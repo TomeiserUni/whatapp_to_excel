@@ -2,12 +2,13 @@ from pathlib import Path
 import numpy as np
 import easyocr
 from sentence_transformers import SentenceTransformer
-import json
 import re
 import math
 from rapidfuzz import fuzz
+import openpyxl
 
 from utils import load_pickle, cosine_similarity, normalizar_unidades
+from parser import quantidade_para_produto
 
 # =========================
 # PATHS
@@ -204,6 +205,39 @@ def encontrar_produtos_levenshtein(trecho, produtos):
     return scores[:3]
 
 # =========================
+# EXCEL OUTPUT
+# =========================
+def _guardar_excel(resultados: dict, caminho: Path) -> None:
+    """
+    Escreve os resultados num ficheiro Excel.
+    Colunas: Imagem | Produto | Quantidade | Score
+    Uma folha por execução, linhas agrupadas por imagem.
+    """
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Resultados"
+
+    # Cabeçalho
+    ws.append(["Imagem", "Produto", "Quantidade", "Score"])
+    header_font = openpyxl.styles.Font(bold=True)
+    for cell in ws[1]:
+        cell.font = header_font
+
+    # Dados
+    for imagem, produtos in resultados.items():
+        for p, s, qty in produtos:
+            ws.append([imagem, p, qty, round(s, 4)])
+
+    # Largura das colunas
+    ws.column_dimensions["A"].width = 30
+    ws.column_dimensions["B"].width = 55
+    ws.column_dimensions["C"].width = 12
+    ws.column_dimensions["D"].width = 10
+
+    wb.save(caminho)
+
+
+# =========================
 # PIPELINE
 # =========================
 def run():
@@ -384,27 +418,34 @@ def run():
         resultado_final = [(p, s, t, o) for p, s, t, o in resultado_final if p not in subsumed]
 
         resultado_final.sort(key=lambda x: x[1], reverse=True)
-        resultados[img.name] = [(p, s) for p, s, _, _ in resultado_final]
+
+        # Associar quantidade a cada produto detectado
+        resultado_com_qtd = []
+        for p, s, melhor_trecho, ocorr in resultado_final:
+            qty = quantidade_para_produto(melhor_trecho, linhas)
+            resultado_com_qtd.append((p, s, qty, melhor_trecho, ocorr))
+
+        resultados[img.name] = [(p, s, qty) for p, s, qty, _, _ in resultado_com_qtd]
 
         # ---- RESULTADO FINAL ----
         secao("RESULTADO FINAL", C.GREEN)
 
-        if not resultado_final:
+        if not resultado_com_qtd:
             print(f"  {C.RED} Nenhum produto encontrado{C.RESET}")
         else:
-            print(f"  {'PRODUTO':<50} {'SCORE':>7}  {'OCORR':>5}  MELHOR TRECHO")
-            print(f"  {'─'*50} {'─'*7}  {'─'*5}  {'─'*30}")
-            for p, s, melhor_trecho, ocorr in resultado_final:
+            print(f"  {'PRODUTO':<50} {'SCORE':>7}  {'QTD':>4}  {'OCORR':>5}  MELHOR TRECHO")
+            print(f"  {'─'*50} {'─'*7}  {'─'*4}  {'─'*5}  {'─'*30}")
+            for p, s, qty, melhor_trecho, ocorr in resultado_com_qtd:
                 cor = score_cor(s)
                 print(f"  {cor}{p:<50}{C.RESET} "
                       f"{cor}{s:>7.4f}{C.RESET}  "
+                      f"{C.CYAN}{qty:>4}x{C.RESET}  "
                       f"{C.DIM}{ocorr:>5}x{C.RESET}  "
                       f"{C.DIM}'{melhor_trecho}'{C.RESET}")
 
-    with open(OUTPUT_DIR / "resultados.json", "w") as f:
-        json.dump(resultados, f, indent=2)
-
-    print(f"\n{C.GREEN}{C.BOLD}  ✔ Resultados guardados em output/resultados.json{C.RESET}\n")
+    # ---- GUARDAR EXCEL ----
+    _guardar_excel(resultados, OUTPUT_DIR / "resultados.xlsx")
+    print(f"\n{C.GREEN}{C.BOLD}  ✔ Resultados guardados em output/resultados.xlsx{C.RESET}\n")
 
 # =========================
 # RUN
