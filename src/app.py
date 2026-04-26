@@ -175,6 +175,9 @@ class App(TkinterDnD.Tk):
         ctk.CTkButton(bottom, text="Limpar cache", width=110,
                       fg_color="#37474f", hover_color="#546e7a",
                       command=self._limpar_cache).pack(side="left", pady=8)
+        ctk.CTkButton(bottom, text="Colar texto", width=100,
+                      fg_color="#1b5e20", hover_color="#2e7d32",
+                      command=self._abrir_colar_texto).pack(side="left", padx=(8, 0), pady=8)
 
         self._progress = ctk.CTkProgressBar(bottom, width=120, mode="indeterminate")
         self._progress.pack(side="right", padx=(0, 8), pady=14)
@@ -330,6 +333,52 @@ class App(TkinterDnD.Tk):
         self._cache.clear()
         _save_cache(self._cache)
         self._status("Cache limpa ✓", ok=True)
+
+    # ── COLAR TEXTO ───────────────────────────────────────────────
+    def _abrir_colar_texto(self):
+        if not self._pipeline:
+            self._status("Aguarda — modelos ainda a carregar…", loading=True)
+            return
+
+        win = ctk.CTkToplevel(self)
+        win.title("Colar texto WhatsApp")
+        win.geometry("500x380")
+        win.configure(fg_color="#1a1a2e")
+        win.grab_set()
+
+        ctk.CTkLabel(win, text="Cola aqui o texto da encomenda:",
+                     font=("Helvetica", 12), text_color="#90caf9").pack(anchor="w", padx=16, pady=(14, 4))
+
+        caixa = ctk.CTkTextbox(win, font=("Helvetica", 12),
+                               fg_color="#0f3460", text_color="#e0e0e0",
+                               corner_radius=8)
+        caixa.pack(fill="both", expand=True, padx=16, pady=(0, 10))
+        caixa.focus()
+
+        def processar():
+            texto = caixa.get("1.0", "end").strip()
+            if not texto:
+                return
+            win.destroy()
+            threading.Thread(target=self._processar_texto_colado,
+                             args=(texto,), daemon=True).start()
+
+        ctk.CTkButton(win, text="Processar", fg_color="#1565c0",
+                      hover_color="#1976d2", command=processar).pack(pady=(0, 14))
+
+    def _processar_texto_colado(self, texto: str):
+        self.after(0, lambda: self._status("A processar texto…", loading=True))
+        try:
+            pl       = self._pipeline
+            resultado = pl["pl"].processar_texto(texto, pl["produtos"], pl["emb_prod"])
+            nome = "texto colado"
+            self._resultados[nome] = resultado
+            self.after(0, self._add_rows, nome, resultado)
+            total = sum(len(v) for v in self._resultados.values())
+            self.after(0, lambda: self._status(f"{total} produto(s) detectado(s)", ok=True))
+        except Exception as exc:
+            self.after(0, lambda: self._status(f"Erro: {exc}", error=True))
+            print(f"[ERRO texto] {exc}")
 
 
 # =========================

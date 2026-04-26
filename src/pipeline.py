@@ -7,7 +7,7 @@ import math
 from rapidfuzz import fuzz
 import openpyxl
 
-from utils import load_pickle, cosine_similarity, normalizar_unidades
+from utils import load_pickle, cosine_similarity, normalizar_unidades, remover_acentos
 from parser import quantidade_para_produto
 
 # =========================
@@ -82,6 +82,7 @@ def extrair_linhas(imagem_path):
     for bbox, text, _ in result:
         y = bbox[0][1]
         text = text.lower()
+        text = remover_acentos(text)
         text = re.sub(r"[^\w\s]", "", text).strip()
         text = normalizar_unidades(text)
         if not text:
@@ -259,6 +260,8 @@ def _match_trecho_best(
 
     return (melhor_p, melhor_s, melhor_emb, melhor_lev) if melhor_p else None
 
+_LEADING_QTY = re.compile(r"^\d+\s+")
+
 def processar_linha(
     linha: str, produtos, emb_prod, freq_palavras,
     verbose: bool = False
@@ -268,7 +271,10 @@ def processar_linha(
     Retorna lista de (produto, score, trecho, s_emb, s_lev).
     Se verbose=True, imprime cada trecho tentado e o vencedor por posição.
     """
-    palavras = linha.split()
+    # Remove número inicial de quantidade ("4 verniz gel..." → "verniz gel...")
+    # para evitar que o número seja consumido no matching de produto.
+    linha_match = _LEADING_QTY.sub("", linha)
+    palavras = linha_match.split()
     n = len(palavras)
     consumed = [False] * n
 
@@ -311,11 +317,11 @@ def processar_linha(
 
             if best is None or score > best[1]:
                 best = (produto, score, trecho, j, s_emb, s_lev)
-            elif abs(score - best[1]) < 0.001:
-                if len(trecho) > len(best[2]):
-                    best = (produto, score, trecho, j, s_emb, s_lev)
+            elif len(trecho) > len(best[2]) and score >= best[1] - 0.10:
+                # trecho mais longo com score próximo → produto mais específico ganha
+                best = (produto, score, trecho, j, s_emb, s_lev)
             else:
-                if score < best[1] - 0.05:
+                if score < best[1] - 0.10:
                     break
 
         if best:
@@ -392,6 +398,27 @@ PALAVRAS_GENERICAS = {"gel", "tips", "builder"}
 
 
 # =========================
+# FUSÃO DE LINHAS CURTAS
+# =========================
+def _fundir_linhas_curtas(linhas: list[str], produtos, emb_prod, freq_palavras) -> list[str]:
+    """
+    Linhas com 1-2 palavras significativas que não produzem nenhum match
+    são fundidas com a linha anterior, para que o sliding window possa
+    alcançá-las (ex: 'resolve' + 'tudo' na linha seguinte).
+    """
+    resultado = []
+    for linha in linhas:
+        palavras_sig = [w for w in _LEADING_QTY.sub("", linha).split() if w not in STOPWORDS]
+        if len(palavras_sig) <= 2 and resultado:
+            matches = processar_linha(linha, produtos, emb_prod, freq_palavras)
+            if not matches:
+                resultado[-1] = resultado[-1] + " " + linha
+                continue
+        resultado.append(linha)
+    return resultado
+
+
+# =========================
 # PROCESSAR IMAGEM (silent — sem prints, para usar no app)
 # =========================
 def processar_imagem(img_path: Path, produtos: list, emb_prod) -> list[tuple[str, float, int]]:
@@ -402,6 +429,7 @@ def processar_imagem(img_path: Path, produtos: list, emb_prod) -> list[tuple[str
     """
     freq_palavras = calcular_freq_palavras(produtos, STOPWORDS)
     linhas        = extrair_linhas(img_path)
+    linhas        = _fundir_linhas_curtas(linhas, produtos, emb_prod, freq_palavras)
 
     ocr_tokens, ocr_tokens_num = set(), set()
     for linha in linhas:
@@ -431,6 +459,44 @@ def processar_imagem(img_path: Path, produtos: list, emb_prod) -> list[tuple[str
     resultado = validados
 
     # Filtro subsumption
+    words    = {p: set(p.lower().split()) - STOPWORDS for p, _, _ in resultado}
+    subsumed = {p1 for p1, w1 in words.items()
+                for p2, w2 in words.items() if p1 != p2 and w1.issubset(w2)}
+    resultado = [(p, s, t) for p, s, t in resultado if p not in subsumed]
+    resultado.sort(key=lambda x: x[1], reverse=True)
+
+    return [(p, s, quantidade_para_produto(t, linhas, produto_nome=p))
+            for p, s, t in resultado]
+
+
+# =========================
+# PROCESSAR TEXTO (sem OCR — texto colado directamente)
+# =========================
+def processar_texto(texto: str, produtos: list, emb_prod) -> list[tuple[str, float, int]]:
+    """
+    Processa texto colado (sem OCR) e devolve [(produto, score, quantidade), ...].
+    """
+    linhas = []
+    for linha in texto.splitlines():
+        linha = linha.lower()
+        linha = remover_acentos(linha)
+        linha = re.sub(r"[^\w\s]", "", linha).strip()
+        linha = normalizar_unidades(linha)
+        if linha:
+            linhas.append(linha)
+
+    freq_palavras = calcular_freq_palavras(produtos, STOPWORDS)
+    linhas        = _fundir_linhas_curtas(linhas, produtos, emb_prod, freq_palavras)
+
+    melhor: dict[str, tuple[float, str]] = {}
+    for linha in linhas:
+        for produto, score, trecho, *_ in processar_linha(linha, produtos, emb_prod, freq_palavras):
+            if produto not in melhor or score > melhor[produto][0]:
+                melhor[produto] = (score, trecho)
+
+    resultado = [(p, s, t) for p, (s, t) in melhor.items()]
+    resultado.sort(key=lambda x: x[1], reverse=True)
+
     words    = {p: set(p.lower().split()) - STOPWORDS for p, _, _ in resultado}
     subsumed = {p1 for p1, w1 in words.items()
                 for p2, w2 in words.items() if p1 != p2 and w1.issubset(w2)}

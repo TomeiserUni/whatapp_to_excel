@@ -1,4 +1,5 @@
 import re
+import unicodedata
 import numpy as np
 import pickle
 
@@ -13,6 +14,14 @@ def cosine_similarity(a, b):
     if denom == 0:
         return 0.0
     return float(np.dot(a, b) / denom)
+
+
+def remover_acentos(texto: str) -> str:
+    """'espírito' → 'espirito', 'última' → 'ultima'."""
+    return "".join(
+        c for c in unicodedata.normalize("NFD", texto)
+        if unicodedata.category(c) != "Mn"
+    )
 
 
 def normalizar_unidades(texto):
