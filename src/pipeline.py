@@ -205,6 +205,151 @@ def encontrar_produtos_levenshtein(trecho, produtos):
     return scores[:3]
 
 # =========================
+# GREEDY EXPANSION
+# =========================
+def _match_trecho_best(
+    trecho: str, produtos, emb_prod, freq_palavras
+) -> tuple[str, float, float, float] | None:
+    """
+    Avalia um trecho contra o catálogo.
+    Retorna (melhor_produto, score_combinado, s_emb, s_lev) ou None.
+    """
+    palavras_t = {w for w in trecho.lower().split() if w not in STOPWORDS}
+    if not palavras_t:
+        return None
+
+    candidatos = {}
+    for p, s in encontrar_produtos_ia(trecho, produtos, emb_prod)[:3]:
+        candidatos[p] = {"emb": s, "lev": 0}
+    for p, s in encontrar_produtos_levenshtein(trecho, produtos)[:3]:
+        if p not in candidatos:
+            candidatos[p] = {"emb": 0, "lev": s}
+        else:
+            candidatos[p]["lev"] = s
+
+    melhor_p, melhor_s, melhor_emb, melhor_lev = None, 0.0, 0.0, 0.0
+    for produto, sc in candidatos.items():
+        s_emb, s_lev = sc["emb"], sc["lev"]
+        if s_emb == 0:
+            score = s_lev
+        elif s_lev == 0:
+            score = s_emb
+        else:
+            score = 0.6 * s_emb + 0.4 * s_lev
+        if s_lev > 0.95:
+            score += 0.05
+        for k in KEYWORDS_BOOST:
+            if k in produto.lower() and k in trecho:
+                score += 0.05
+        score = min(score, 1.0)
+
+        threshold  = calcular_threshold(produto, freq_palavras, STOPWORDS)
+        palavras_p = set(produto.lower().split())
+
+        if palavras_t - palavras_p:
+            continue
+        if len(palavras_t) >= 2:
+            score = min(score + len(palavras_t) * 0.03, 1.0)
+        if score < 0.85 and any(g in produto.lower() for g in PALAVRAS_GENERICAS):
+            continue
+        if score <= threshold:
+            continue
+        if score > melhor_s:
+            melhor_s, melhor_p, melhor_emb, melhor_lev = score, produto, s_emb, s_lev
+
+    return (melhor_p, melhor_s, melhor_emb, melhor_lev) if melhor_p else None
+
+def processar_linha(
+    linha: str, produtos, emb_prod, freq_palavras,
+    verbose: bool = False
+) -> list[tuple[str, float, str, float, float]]:
+    """
+    Greedy window expansion ajustado.
+    Retorna lista de (produto, score, trecho, s_emb, s_lev).
+    Se verbose=True, imprime cada trecho tentado e o vencedor por posição.
+    """
+    palavras = linha.split()
+    n = len(palavras)
+    consumed = [False] * n
+
+    MIN_WIN = 1
+    resultados = []
+    i = 0
+
+    while i < n:
+        if consumed[i] or palavras[i] in STOPWORDS:
+            i += 1
+            continue
+
+        best = None  # (produto, score, trecho, end_idx, s_emb, s_lev)
+
+        for size in range(MIN_WIN, n - i + 1):
+            j = i + size
+
+            if any(consumed[k] for k in range(i, j)):
+                break
+
+            trecho = " ".join(palavras[i:j])
+            result = _match_trecho_best(trecho, produtos, emb_prod, freq_palavras)
+
+            if verbose:
+                if result:
+                    p_t, s_t, e_t, l_t = result
+                    cor = score_cor(s_t)
+                    print(f"      {C.DIM}·{C.RESET} {C.WHITE}'{trecho}'{C.RESET}"
+                          f" → {cor}{p_t}{C.RESET}"
+                          f"  {cor}{s_t:.3f}{C.RESET}"
+                          f"  {C.DIM}emb{C.RESET} {score_cor(e_t)}{e_t:.3f}{C.RESET}"
+                          f"  {C.DIM}lev{C.RESET} {score_cor(l_t)}{l_t:.3f}{C.RESET}")
+                else:
+                    print(f"      {C.DIM}· '{trecho}' → —{C.RESET}")
+
+            if result is None:
+                continue
+
+            produto, score, s_emb, s_lev = result
+
+            if best is None or score > best[1]:
+                best = (produto, score, trecho, j, s_emb, s_lev)
+            elif abs(score - best[1]) < 0.001:
+                if len(trecho) > len(best[2]):
+                    best = (produto, score, trecho, j, s_emb, s_lev)
+            else:
+                if score < best[1] - 0.05:
+                    break
+
+        if best:
+            end = best[3]
+
+            while end > i + MIN_WIN and palavras[end - 1].lower() in STOPWORDS:
+                end -= 1
+
+            trecho_final = " ".join(palavras[i:end])
+
+            if len(trecho_final.split()) == 1 and best[1] < 0.85:
+                if verbose:
+                    print(f"      {C.DIM}  → '{trecho_final}' rejeitado (1 palavra, score < 0.85){C.RESET}")
+                i += 1
+                continue
+
+            if verbose:
+                cor = score_cor(best[1])
+                print(f"    {cor}✓{C.RESET} {C.DIM}'{trecho_final}'{C.RESET}"
+                      f" → {cor}{best[0]}{C.RESET}  {cor}{best[1]:.3f}{C.RESET}"
+                      f"  {C.DIM}emb{C.RESET} {score_cor(best[4])}{best[4]:.3f}{C.RESET}"
+                      f"  {C.DIM}lev{C.RESET} {score_cor(best[5])}{best[5]:.3f}{C.RESET}")
+
+            resultados.append((best[0], best[1], trecho_final, best[4], best[5]))
+
+            for k in range(i, end):
+                consumed[k] = True
+            i = end
+        else:
+            i += 1
+
+    return resultados
+
+# =========================
 # EXCEL OUTPUT
 # =========================
 def _guardar_excel(resultados: dict, caminho: Path) -> None:
@@ -238,16 +383,70 @@ def _guardar_excel(resultados: dict, caminho: Path) -> None:
 
 
 # =========================
-# PIPELINE
+# CONSTANTES DE MATCHING
+# =========================
+STOPWORDS       = {"de", "da", "do", "com", "e", "para", "ola", "preciso",
+                   "destes", "produtos", "seguintes", "enviarme", "podes", "os"}
+KEYWORDS_BOOST  = ["primer", "bailarina", "transparente"]
+PALAVRAS_GENERICAS = {"gel", "tips", "builder"}
+
+
+# =========================
+# PROCESSAR IMAGEM (silent — sem prints, para usar no app)
+# =========================
+def processar_imagem(img_path: Path, produtos: list, emb_prod) -> list[tuple[str, float, int]]:
+    """
+    Processa uma imagem e devolve [(produto, score, quantidade), ...].
+    Usa greedy expansion com word consumption por linha (ver processar_linha).
+    Sem output no terminal — para uso no app.
+    """
+    freq_palavras = calcular_freq_palavras(produtos, STOPWORDS)
+    linhas        = extrair_linhas(img_path)
+
+    ocr_tokens, ocr_tokens_num = set(), set()
+    for linha in linhas:
+        for w in linha.split():
+            if w not in STOPWORDS:
+                (ocr_tokens if w.isalpha() else ocr_tokens_num).add(w)
+
+    # Greedy expansion por linha; se o mesmo produto aparecer em várias linhas → score máximo
+    melhor: dict[str, tuple[float, str]] = {}   # produto → (score, trecho)
+    for linha in linhas:
+        for produto, score, trecho, *_ in processar_linha(linha, produtos, emb_prod, freq_palavras):
+            if produto not in melhor or score > melhor[produto][0]:
+                melhor[produto] = (score, trecho)
+
+    resultado = [(p, s, t) for p, (s, t) in melhor.items()]
+    resultado.sort(key=lambda x: x[1], reverse=True)
+
+    # Filtro OCR
+    def no_ocr(w):
+        return (w in ocr_tokens) if w.isalpha() else any(fuzz.ratio(w, t) >= 80 for t in ocr_tokens_num)
+
+    validados = []
+    for p, s, t in resultado:
+        ausentes = {w for w in p.lower().split() if w not in STOPWORDS and not no_ocr(w)}
+        if not ausentes or unica_opcao_para_trecho(p, t, produtos, STOPWORDS):
+            validados.append((p, s, t))
+    resultado = validados
+
+    # Filtro subsumption
+    words    = {p: set(p.lower().split()) - STOPWORDS for p, _, _ in resultado}
+    subsumed = {p1 for p1, w1 in words.items()
+                for p2, w2 in words.items() if p1 != p2 and w1.issubset(w2)}
+    resultado = [(p, s, t) for p, s, t in resultado if p not in subsumed]
+    resultado.sort(key=lambda x: x[1], reverse=True)
+
+    return [(p, s, quantidade_para_produto(t, linhas, produto_nome=p))
+            for p, s, t in resultado]
+
+
+# =========================
+# PIPELINE (CLI com output detalhado)
 # =========================
 def run():
     produtos, emb_prod = load_produtos()
     resultados = {}
-
-    STOPWORDS = {"de", "da", "do", "com", "e", "para", "ola", "preciso",
-                 "destes", "produtos", "seguintes", "enviarme", "podes", "os"}
-    KEYWORDS_BOOST = ["primer", "bailarina", "transparente"]
-    PALAVRAS_GENERICAS = {"gel", "tips", "builder"}
 
     freq_palavras = calcular_freq_palavras(produtos, STOPWORDS)
 
@@ -270,128 +469,39 @@ def run():
         for i, l in enumerate(linhas, 1):
             print(f"    {C.DIM}{i:2}.{C.RESET} {C.WHITE}{l}{C.RESET}")
 
-        trechos = gerar_trechos_por_linha(linhas)
-        print(f"\n  {C.DIM}Trechos gerados: {len(trechos)}{C.RESET}")
-        for i, t in enumerate(trechos, 1):
-            print(f"    {C.DIM}{i:3}. '{t}'{C.RESET}")
+        # ---- GREEDY EXPANSION ----
+        secao("GREEDY EXPANSION", C.BLUE)
 
-        scores_produtos = {}
+        melhor_scores: dict[str, tuple[float, str]] = {}   # produto → (score, trecho)
 
-        # ---- PROCESSAMENTO ----
-        secao("PROCESSAMENTO DE TRECHOS", C.BLUE)
-
-        for trecho in trechos:
-            palavras_trecho = trecho.split()
-            if all(p in STOPWORDS for p in palavras_trecho):
+        for linha in linhas:
+            if all(w in STOPWORDS for w in linha.split()):
                 continue
 
-            matches_emb = encontrar_produtos_ia(trecho, produtos, emb_prod)[:1]
-            matches_lev = encontrar_produtos_levenshtein(trecho, produtos)[:1]
+            print(f"\n  {C.DIM}linha:{C.RESET} {C.WHITE}'{linha}'{C.RESET}")
 
-            candidatos = {}
-            for p, s in matches_emb:
-                candidatos[p] = {"emb": s, "lev": 0}
-            for p, s in matches_lev:
-                if p not in candidatos:
-                    candidatos[p] = {"emb": 0, "lev": s}
-                else:
-                    candidatos[p]["lev"] = s
+            matches = processar_linha(linha, produtos, emb_prod, freq_palavras, verbose=True)
+            if not matches:
+                print(f"    {C.DIM}(sem match){C.RESET}")
+            for produto, score, trecho, *_ in matches:
+                if produto not in melhor_scores or score > melhor_scores[produto][0]:
+                    melhor_scores[produto] = (score, trecho)
 
-            print(f"\n  {C.DIM}trecho:{C.RESET} {C.WHITE}'{trecho}'{C.RESET}")
+        # ---- FILTROS ----
+        resultado_final = [(p, round(s, 4), t) for p, (s, t) in melhor_scores.items()]
+        resultado_final.sort(key=lambda x: x[1], reverse=True)
 
-            for produto, scores in candidatos.items():
-                s_emb = scores["emb"]
-                s_lev = scores["lev"]
-
-                if s_emb == 0:
-                    score_final = s_lev
-                elif s_lev == 0:
-                    score_final = s_emb
-                else:
-                    score_final = 0.6 * s_emb + 0.4 * s_lev
-
-                if s_lev > 0.95:
-                    score_final += 0.05
-                for k in KEYWORDS_BOOST:
-                    if k in produto.lower() and k in trecho:
-                        score_final += 0.05
-                score_final = min(score_final, 1.0)
-
-                threshold = calcular_threshold(produto, freq_palavras, STOPWORDS)
-
-                # Containment: palavras do trecho devem estar todas no produto
-                palavras_t = {w for w in trecho.lower().split() if w not in STOPWORDS}
-                palavras_p = set(produto.lower().split())
-                faltam = palavras_t - palavras_p
-                if faltam:
-                    print(f"    {C.DIM}✗ msg∉prod  {produto}  {score_final:.3f}  faltam:{faltam}{C.RESET}")
-                    continue
-
-                # Boost por containment: mais palavras do trecho no produto → score sobe mais
-                # (mínimo 2 palavras para evitar boost em trechos de 1 palavra)
-                if len(palavras_t) >= 2:
-                    score_final = min(score_final + len(palavras_t) * 0.03, 1.0)
-
-                if score_final < 0.85 and any(p in produto.lower() for p in PALAVRAS_GENERICAS):
-                    print(f"    {C.DIM}✗ genérica   {produto}  {score_final:.3f}  emb:{s_emb:.2f} lev:{s_lev:.2f}{C.RESET}")
-                    continue
-
-                if score_final <= threshold:
-                    print(f"    {C.DIM}✗ thr {score_final:.3f}≤{threshold:.3f}  {produto}  emb:{s_emb:.2f} lev:{s_lev:.2f}{C.RESET}")
-                    continue
-
-                tamanho_trecho = len(palavras_trecho)
-                if produto not in scores_produtos:
-                    scores_produtos[produto] = {"scores": [], "max_trecho": 0, "melhor_trecho": ""}
-                scores_produtos[produto]["scores"].append(score_final)
-                if tamanho_trecho > scores_produtos[produto]["max_trecho"]:
-                    scores_produtos[produto]["max_trecho"] = tamanho_trecho
-                    scores_produtos[produto]["melhor_trecho"] = trecho
-
-                cor = score_cor(score_final)
-                print(f"    {cor}✓{C.RESET} {produto}")
-                print(f"      {barra(score_final)} {cor}{score_final:.3f}{C.RESET}  "
-                      f"{C.DIM}emb:{s_emb:.2f}  lev:{s_lev:.2f}{C.RESET}")
-
-        # ---- AGREGAÇÃO ----
-        secao("AGREGAÇÃO", C.BLUE)
-
-        # Calcular scores finais e mostrar todos os candidatos
-        candidatos_agg = []
-        for produto, dados in scores_produtos.items():
-            lista_scores = dados["scores"]
-            media = sum(lista_scores) / len(lista_scores)
-            ocorrencias = len(lista_scores)
-            score_agg = media + 0.03 * math.log1p(min(ocorrencias, 5))
-            candidatos_agg.append((produto, round(score_agg, 4), dados["melhor_trecho"], ocorrencias))
-        candidatos_agg.sort(key=lambda x: x[1], reverse=True)
-
-        print(f"\n  {'CANDIDATO':<50} {'SCORE':>7}  {'OCORR':>5}")
-        print(f"  {'─'*50} {'─'*7}  {'─'*5}")
-        for p, s, _, o in candidatos_agg:
-            cor = score_cor(s) if s > 0.85 else C.DIM
-            print(f"  {cor}{p:<50}{C.RESET} {cor}{s:>7.4f}{C.RESET}  {C.DIM}{o:>5}x{C.RESET}")
-
-        # Filtro 1: score mínimo
-        resultado_final = [(p, s, t, o) for p, s, t, o in candidatos_agg if s > 0.85]
-
-        # Filtro 2: validação OCR — todas as palavras do produto devem existir na imagem.
-        # Palavras alfabéticas: match exato. Tokens numéricos/unidades: fuzzy (trata erros OCR).
         def palavra_no_ocr(palavra):
-            if palavra.isalpha():
-                return palavra in ocr_tokens
-            return any(fuzz.ratio(palavra, t) >= 80 for t in ocr_tokens_num)
+            return (palavra in ocr_tokens) if palavra.isalpha() \
+                else any(fuzz.ratio(palavra, tk) >= 80 for tk in ocr_tokens_num)
 
         ocr_filtrados = False
         validados = []
-        for p, s, t, o in resultado_final:
-            requeridas = {w for w in p.lower().split() if w not in STOPWORDS}
-            ausentes = {w for w in requeridas if not palavra_no_ocr(w)}
+        for p, s, t in resultado_final:
+            ausentes = {w for w in p.lower().split() if w not in STOPWORDS and not palavra_no_ocr(w)}
             if ausentes:
-                # Se é a única opção para o melhor trecho, as palavras extra são
-                # apenas abreviação — aceitar mesmo ausentes no OCR
                 if unica_opcao_para_trecho(p, t, produtos, STOPWORDS):
-                    validados.append((p, s, t, o))
+                    validados.append((p, s, t))
                     print(f"    {C.DIM}~ único match  {p}  (abreviado, ausentes: {', '.join(sorted(ausentes))}){C.RESET}")
                 else:
                     if not ocr_filtrados:
@@ -399,12 +509,10 @@ def run():
                         ocr_filtrados = True
                     print(f"    {C.RED}✗{C.RESET} {p}  {C.DIM}(ausentes no OCR: {', '.join(sorted(ausentes))}){C.RESET}")
             else:
-                validados.append((p, s, t, o))
+                validados.append((p, s, t))
         resultado_final = validados
 
-        # Filtro 3: subsumption — remove "verniz gel" se "verniz gel leitoso" já está
-        # Computa num único passo O(n²) e preserva o produto que subsume para o log
-        nomes_words = {p: set(p.lower().split()) - STOPWORDS for p, _, _, _ in resultado_final}
+        nomes_words = {p: set(p.lower().split()) - STOPWORDS for p, _, _ in resultado_final}
         subsumed = {}
         for p1, w1 in nomes_words.items():
             for p2, w2 in nomes_words.items():
@@ -415,37 +523,32 @@ def run():
             print(f"\n  {C.YELLOW}{C.BOLD}  ▶ FILTRO SUBSUMPTION{C.RESET}")
             for p, sup in subsumed.items():
                 print(f"    {C.YELLOW}⊂{C.RESET} '{p}' contido em '{sup}' → removido")
-        resultado_final = [(p, s, t, o) for p, s, t, o in resultado_final if p not in subsumed]
-
+        resultado_final = [(p, s, t) for p, s, t in resultado_final if p not in subsumed]
         resultado_final.sort(key=lambda x: x[1], reverse=True)
 
-        # Associar quantidade a cada produto detectado
-        resultado_com_qtd = []
-        for p, s, melhor_trecho, ocorr in resultado_final:
-            qty = quantidade_para_produto(melhor_trecho, linhas)
-            resultado_com_qtd.append((p, s, qty, melhor_trecho, ocorr))
-
-        resultados[img.name] = [(p, s, qty) for p, s, qty, _, _ in resultado_com_qtd]
+        resultado_com_qtd = [(p, s, quantidade_para_produto(t, linhas, produto_nome=p), t)
+                             for p, s, t in resultado_final]
+        resultados[img.name] = [(p, s, qty) for p, s, qty, _ in resultado_com_qtd]
 
         # ---- RESULTADO FINAL ----
         secao("RESULTADO FINAL", C.GREEN)
-
         if not resultado_com_qtd:
             print(f"  {C.RED} Nenhum produto encontrado{C.RESET}")
         else:
-            print(f"  {'PRODUTO':<50} {'SCORE':>7}  {'QTD':>4}  {'OCORR':>5}  MELHOR TRECHO")
-            print(f"  {'─'*50} {'─'*7}  {'─'*4}  {'─'*5}  {'─'*30}")
-            for p, s, qty, melhor_trecho, ocorr in resultado_com_qtd:
+            print(f"  {'PRODUTO':<50} {'SCORE':>7}  {'QTD':>4}  TRECHO")
+            print(f"  {'─'*50} {'─'*7}  {'─'*4}  {'─'*30}")
+            for p, s, qty, trecho in resultado_com_qtd:
                 cor = score_cor(s)
-                print(f"  {cor}{p:<50}{C.RESET} "
-                      f"{cor}{s:>7.4f}{C.RESET}  "
-                      f"{C.CYAN}{qty:>4}x{C.RESET}  "
-                      f"{C.DIM}{ocorr:>5}x{C.RESET}  "
-                      f"{C.DIM}'{melhor_trecho}'{C.RESET}")
+                print(f"  {cor}{p:<50}{C.RESET} {cor}{s:>7.4f}{C.RESET}  "
+                      f"{C.CYAN}{qty:>4}x{C.RESET}  {C.DIM}'{trecho}'{C.RESET}")
 
-    # ---- GUARDAR EXCEL ----
-    _guardar_excel(resultados, OUTPUT_DIR / "resultados.xlsx")
+    # ---- GUARDAR E ABRIR EXCEL ----
+    excel_path = OUTPUT_DIR / "resultados.xlsx"
+    _guardar_excel(resultados, excel_path)
     print(f"\n{C.GREEN}{C.BOLD}  ✔ Resultados guardados em output/resultados.xlsx{C.RESET}\n")
+    import subprocess, sys
+    if sys.platform == "darwin":
+        subprocess.run(["open", str(excel_path)])
 
 # =========================
 # RUN
