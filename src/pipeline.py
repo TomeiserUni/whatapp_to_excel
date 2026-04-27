@@ -24,7 +24,8 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 # MODELOS
 # =========================
 reader = easyocr.Reader(['pt'])
-model = SentenceTransformer("all-MiniLM-L6-v2")
+_MODEL_FINETUNED = BASE_DIR / "data" / "model_finetuned"
+model = SentenceTransformer(str(_MODEL_FINETUNED) if _MODEL_FINETUNED.exists() else "all-MiniLM-L6-v2")
 
 # =========================
 # CORES TERMINAL
