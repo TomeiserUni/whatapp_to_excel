@@ -25,9 +25,16 @@ def remover_acentos(texto: str) -> str:
 
 
 def normalizar_unidades(texto):
-    """Remove sufixos de unidades após números: '30ml' → '30', '30m1' → '30', '50g' → '50'."""
+    """Remove sufixos de unidades após números: '30ml' → '30', '500grs' → '500'."""
     tokens = texto.split()
-    return " ".join(
-        re.sub(r"^(\d+).*", r"\1", t) if re.match(r"^\d+[a-zA-Z]", t) else t
-        for t in tokens
-    )
+    result = []
+    for t in tokens:
+        # Corrigir confusão OCR: sequência inicial de dígitos misturada com 'O'/'o'
+        # ex: '5OO' → '500', '5OOgrs' → '500grs', '5O0grs' → '500grs'
+        if re.match(r"^\d", t):
+            t = re.sub(r"^([\dOo]+)", lambda m: m.group(1).upper().replace("O", "0"), t)
+        if re.match(r"^\d+[a-zA-Z]", t):
+            result.append(re.sub(r"^(\d+).*", r"\1", t))
+        else:
+            result.append(t)
+    return " ".join(result)

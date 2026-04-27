@@ -440,20 +440,30 @@ PALAVRAS_GENERICAS = {"gel", "tips", "builder"}
 # =========================
 def _fundir_linhas_curtas(linhas: list[str], produtos, emb_prod, freq_palavras) -> list[str]:
     """
-    Linhas com 1-2 palavras significativas que não produzem nenhum match
-    são fundidas com a linha anterior, para que o sliding window possa
-    alcançá-las (ex: 'resolve' + 'tudo' na linha seguinte).
+    Linhas com 1-2 palavras significativas são fundidas com a linha ANTERIOR:
+    - 1 palavra significativa → funde sempre (ex: 'transparente' é atributo do
+      produto acima, nunca um produto isolado)
+    - 2 palavras significativas → funde só se não produzirem match
     """
     resultado = []
+
     for linha in linhas:
         palavras_sig = [w for w in _LEADING_QTY.sub("", linha).split() if w not in STOPWORDS]
-        if len(palavras_sig) <= 2 and resultado:
+        linha_sem_qtd = _LEADING_QTY.sub("", linha).strip()
+
+        if len(palavras_sig) == 1 and resultado:
+            # 1 palavra: funde sempre com a linha anterior
+            resultado[-1] = resultado[-1] + " " + linha_sem_qtd
+            continue
+
+        if len(palavras_sig) == 2 and resultado:
             matches = processar_linha(linha, produtos, emb_prod, freq_palavras)
             if not matches:
-                linha_para_fundir = _LEADING_QTY.sub("", linha).strip()
-                resultado[-1] = resultado[-1] + " " + linha_para_fundir
+                resultado[-1] = resultado[-1] + " " + linha_sem_qtd
                 continue
+
         resultado.append(linha)
+
     return resultado
 
 
