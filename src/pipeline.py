@@ -412,7 +412,8 @@ def _fundir_linhas_curtas(linhas: list[str], produtos, emb_prod, freq_palavras) 
         if len(palavras_sig) <= 2 and resultado:
             matches = processar_linha(linha, produtos, emb_prod, freq_palavras)
             if not matches:
-                resultado[-1] = resultado[-1] + " " + linha
+                linha_para_fundir = _LEADING_QTY.sub("", linha).strip()
+                resultado[-1] = resultado[-1] + " " + linha_para_fundir
                 continue
         resultado.append(linha)
     return resultado
@@ -478,6 +479,7 @@ def processar_texto(texto: str, produtos: list, emb_prod) -> list[tuple[str, flo
     """
     linhas = []
     for linha in texto.splitlines():
+        linha = re.sub(r"^\s*\d+\.\s*", "", linha.strip())  # remove "N. " de lista numerada
         linha = linha.lower()
         linha = remover_acentos(linha)
         linha = re.sub(r"[^\w\s]", "", linha).strip()
@@ -523,6 +525,7 @@ def run():
         header(f"IMAGEM: {img.name}", C.MAGENTA)
 
         linhas = extrair_linhas(img)
+        linhas = _fundir_linhas_curtas(linhas, produtos, emb_prod, freq_palavras)
 
         # Tokens alfabéticos (match exato) e numéricos/unidades (fuzzy, ex: "30ml" ≈ "30m1")
         ocr_tokens, ocr_tokens_num = set(), set()
