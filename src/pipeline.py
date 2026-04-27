@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import numpy as np
 import easyocr
 from sentence_transformers import SentenceTransformer
@@ -69,6 +70,21 @@ def load_produtos():
     sku_map = load_pickle(sku_map_path) if sku_map_path.exists() else {}
     return produtos, embeddings, sku_map
 
+def load_aliases() -> dict[str, str]:
+    """
+    Carrega data/aliases.json: mapeamentos fixos alias→produto.
+    As chaves são normalizadas (lowercase, sem acentos) para casar com o input.
+    """
+    path = DATA_DIR / "aliases.json"
+    if not path.exists():
+        return {}
+    with open(path, encoding="utf-8") as f:
+        raw = json.load(f)
+    return {
+        remover_acentos(k.lower().strip()): v
+        for k, v in raw.items()
+    }
+
 # =========================
 # OCR
 # =========================
@@ -136,13 +152,15 @@ def calcular_freq_palavras(produtos, stopwords):
             freq[w] = freq.get(w, 0) + 1
     return freq
 
-def calcular_threshold(produto, freq_palavras, stopwords, base=0.82, penalidade=0.08):
+def calcular_threshold(produto, freq_palavras, stopwords, base=0.82, penalidade=0.06):
     """
     Produtos com palavras muito comuns no catálogo (baixa especificidade)
     recebem threshold mais alto — até base + penalidade.
     Produtos com palavras únicas recebem threshold base.
+    Números puros (ex: '50', '500') são excluídos: são qualificadores de variante,
+    não palavras de categoria, e têm frequência artificialmente alta.
     """
-    palavras = set(produto.lower().split()) - stopwords
+    palavras = {w for w in produto.lower().split() if w not in stopwords and not w.isdigit()}
     if not palavras:
         return base
     especificidade = sum(1.0 / freq_palavras.get(w, 1) for w in palavras) / len(palavras)
@@ -200,6 +218,8 @@ def encontrar_produtos_levenshtein(trecho, produtos, freq_palavras=None):
     for p in produtos:
         palavras_produto = set(p.lower().split())
         s_set = fuzz.token_set_ratio(trecho, p.lower()) / 100
+        # Comparação sem espaços: apanha palavras concatenadas (ex: "noblue" ≡ "no blue")
+        s_set = max(s_set, fuzz.ratio(trecho.replace(" ", ""), p.lower().replace(" ", "")) / 100)
 
         # Parear palavras com fuzzy matching para não penalizar typos (ex: tammy↔tawny)
         matched_t, matched_p = set(), set()
@@ -216,7 +236,8 @@ def encontrar_produtos_levenshtein(trecho, produtos, freq_palavras=None):
                 matched_t.add(w_t); matched_p.add(best_p)
 
         # Penalizar apenas palavras verdadeiramente sem par
-        extra_produto = len(palavras_produto - matched_p) * 0.06
+        # (excluir stopwords e unidades — o utilizador raramente as escreve)
+        extra_produto = len((palavras_produto - matched_p) - STOPWORDS - UNIDADES) * 0.06
         extra_trecho = 0.0
         for w in palavras_trecho - matched_t:
             freq = freq_palavras.get(w, 0) if freq_palavras else 0
@@ -272,10 +293,19 @@ def _match_trecho_best(
         palavras_p = set(produto.lower().split())
 
         n_total = max(1, len(produtos))
+        # Concatenações sem espaço de n-gramas do produto (ex: "no"+"blue" → "noblue")
+        # para aceitar variantes escritas sem espaço pelo utilizador.
+        palavras_p_list = produto.lower().split()
+        concat_ngrams = {
+            "".join(palavras_p_list[s:s+k])
+            for k in range(2, min(5, len(palavras_p_list) + 1))
+            for s in range(len(palavras_p_list) - k + 1)
+        }
         sem_match = {
             w for w in palavras_t
             if w not in palavras_p
             and not any(fuzz.ratio(w, p) >= 82 for p in palavras_p)
+            and not any(fuzz.ratio(w, ng) >= 82 for ng in concat_ngrams)
             # palavras comuns (aparecem em muitos produtos) não bloqueiam o match
             and freq_palavras.get(w, 0) < max(3, n_total * 0.01)
         }
@@ -299,6 +329,7 @@ _LEADING_QTY = re.compile(r"^\d+\s+")
 
 def processar_linha(
     linha: str, produtos, emb_prod, freq_palavras,
+    aliases: dict | None = None,
     verbose: bool = False
 ) -> list[tuple[str, float, str, float, float]]:
     """
@@ -324,7 +355,24 @@ def processar_linha(
 
         best = None  # (produto, score, trecho, end_idx, s_emb, s_lev)
 
-        for size in range(MIN_WIN, n - i + 1):
+        # Aliases têm prioridade máxima — verifica do mais longo para o mais curto
+        if aliases:
+            for length in range(n - i, 0, -1):
+                if any(consumed[i + k] for k in range(length)):
+                    continue
+                trecho_alias = " ".join(palavras[i:i + length])
+                if trecho_alias in aliases:
+                    produto_alias = aliases[trecho_alias]
+                    best = (produto_alias, 1.0, trecho_alias, i + length, 0.0, 1.0)
+                    if verbose:
+                        print(f"      {C.GREEN}[alias]{C.RESET} {C.WHITE}'{trecho_alias}'{C.RESET}"
+                              f" → {C.GREEN}{produto_alias}{C.RESET}  {C.GREEN}1.000{C.RESET}")
+                    break
+
+        if best is None:
+            pass  # continua para o fuzzy expansion abaixo
+
+        for size in range(MIN_WIN, n - i + 1) if best is None else []:
             j = i + size
 
             if any(consumed[k] for k in range(i, j)):
@@ -431,6 +479,8 @@ def _guardar_excel(resultados: dict, caminho: Path, sku_map: dict = None) -> Non
 # =========================
 STOPWORDS       = {"de", "da", "do", "com", "e", "para", "ola", "preciso",
                    "destes", "produtos", "seguintes", "enviarme", "podes", "os"}
+UNIDADES        = {"ml", "gr", "grs", "g", "kg", "cm", "mm", "l", "lt", "lts",
+                   "un", "und", "unid", "pcs", "pc"}
 KEYWORDS_BOOST  = ["primer", "bailarina", "transparente"]
 PALAVRAS_GENERICAS = {"gel", "tips", "builder"}
 
@@ -438,7 +488,7 @@ PALAVRAS_GENERICAS = {"gel", "tips", "builder"}
 # =========================
 # FUSÃO DE LINHAS CURTAS
 # =========================
-def _fundir_linhas_curtas(linhas: list[str], produtos, emb_prod, freq_palavras) -> list[str]:
+def _fundir_linhas_curtas(linhas: list[str], produtos, emb_prod, freq_palavras, aliases=None) -> list[str]:
     """
     Linhas com 1-2 palavras significativas são fundidas com a linha ANTERIOR:
     - 1 palavra significativa → funde sempre (ex: 'transparente' é atributo do
@@ -457,7 +507,7 @@ def _fundir_linhas_curtas(linhas: list[str], produtos, emb_prod, freq_palavras) 
             continue
 
         if len(palavras_sig) == 2 and resultado:
-            matches = processar_linha(linha, produtos, emb_prod, freq_palavras)
+            matches = processar_linha(linha, produtos, emb_prod, freq_palavras, aliases=aliases)
             if not matches:
                 resultado[-1] = resultado[-1] + " " + linha_sem_qtd
                 continue
@@ -476,9 +526,10 @@ def processar_imagem(img_path: Path, produtos: list, emb_prod) -> list[tuple[str
     Usa greedy expansion com word consumption por linha (ver processar_linha).
     Sem output no terminal — para uso no app.
     """
+    aliases       = load_aliases()
     freq_palavras = calcular_freq_palavras(produtos, STOPWORDS)
     linhas        = extrair_linhas(img_path)
-    linhas        = _fundir_linhas_curtas(linhas, produtos, emb_prod, freq_palavras)
+    linhas        = _fundir_linhas_curtas(linhas, produtos, emb_prod, freq_palavras, aliases=aliases)
 
     ocr_tokens, ocr_tokens_num = set(), set()
     for linha in linhas:
@@ -490,7 +541,7 @@ def processar_imagem(img_path: Path, produtos: list, emb_prod) -> list[tuple[str
     melhor: dict[str, tuple[float, str]] = {}   # produto → (score, trecho)
     ordem:  dict[str, int] = {}                 # produto → índice da primeira linha onde apareceu
     for i, linha in enumerate(linhas):
-        for produto, score, trecho, *_ in processar_linha(linha, produtos, emb_prod, freq_palavras):
+        for produto, score, trecho, *_ in processar_linha(linha, produtos, emb_prod, freq_palavras, aliases=aliases):
             if produto not in melhor or score > melhor[produto][0]:
                 melhor[produto] = (score, trecho)
             if produto not in ordem:
@@ -538,13 +589,14 @@ def processar_texto(texto: str, produtos: list, emb_prod) -> list[tuple[str, flo
         if linha:
             linhas.append(linha)
 
+    aliases       = load_aliases()
     freq_palavras = calcular_freq_palavras(produtos, STOPWORDS)
-    linhas        = _fundir_linhas_curtas(linhas, produtos, emb_prod, freq_palavras)
+    linhas        = _fundir_linhas_curtas(linhas, produtos, emb_prod, freq_palavras, aliases=aliases)
 
     melhor: dict[str, tuple[float, str]] = {}
     ordem:  dict[str, int] = {}
     for i, linha in enumerate(linhas):
-        for produto, score, trecho, *_ in processar_linha(linha, produtos, emb_prod, freq_palavras):
+        for produto, score, trecho, *_ in processar_linha(linha, produtos, emb_prod, freq_palavras, aliases=aliases):
             if produto not in melhor or score > melhor[produto][0]:
                 melhor[produto] = (score, trecho)
             if produto not in ordem:
@@ -568,6 +620,7 @@ def processar_texto(texto: str, produtos: list, emb_prod) -> list[tuple[str, flo
 # =========================
 def run():
     produtos, emb_prod, sku_map = load_produtos()
+    aliases   = load_aliases()
     resultados = {}
 
     freq_palavras = calcular_freq_palavras(produtos, STOPWORDS)
@@ -579,7 +632,7 @@ def run():
         header(f"IMAGEM: {img.name}", C.MAGENTA)
 
         linhas = extrair_linhas(img)
-        linhas = _fundir_linhas_curtas(linhas, produtos, emb_prod, freq_palavras)
+        linhas = _fundir_linhas_curtas(linhas, produtos, emb_prod, freq_palavras, aliases=aliases)
 
         # Tokens alfabéticos (match exato) e numéricos/unidades (fuzzy, ex: "30ml" ≈ "30m1")
         ocr_tokens, ocr_tokens_num = set(), set()
@@ -604,7 +657,7 @@ def run():
 
             print(f"\n  {C.DIM}linha:{C.RESET} {C.WHITE}'{linha}'{C.RESET}")
 
-            matches = processar_linha(linha, produtos, emb_prod, freq_palavras, verbose=True)
+            matches = processar_linha(linha, produtos, emb_prod, freq_palavras, aliases=aliases, verbose=True)
             if not matches:
                 print(f"    {C.DIM}(sem match){C.RESET}")
             for produto, score, trecho, *_ in matches:
