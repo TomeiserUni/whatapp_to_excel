@@ -76,8 +76,8 @@ class App(TkinterDnD.Tk):
     # ── PIPELINE LOAD ─────────────────────────────────────────────
     def _load_pipeline(self):
         import pipeline as pl
-        produtos, emb_prod = pl.load_produtos()
-        self._pipeline = {"pl": pl, "produtos": produtos, "emb_prod": emb_prod}
+        produtos, emb_prod, sku_map = pl.load_produtos()
+        self._pipeline = {"pl": pl, "produtos": produtos, "emb_prod": emb_prod, "sku_map": sku_map}
         self.after(0, lambda: self._status("Pronto — arrasta as imagens ou clica na zona de drop", ok=True))
 
     # ── UI ────────────────────────────────────────────────────────
@@ -299,21 +299,24 @@ class App(TkinterDnD.Tk):
         if not path:
             return
 
+        sku_map = self._pipeline.get("sku_map", {}) if self._pipeline else {}
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = "Resultados"
-        ws.append(["Imagem", "Produto", "Quantidade", "Score"])
+        ws.append(["Imagem", "Referência", "Produto", "Quantidade", "Score"])
         for cell in ws[1]:
             cell.font = openpyxl.styles.Font(bold=True)
         ws.column_dimensions["A"].width = 30
-        ws.column_dimensions["B"].width = 55
-        ws.column_dimensions["C"].width = 12
-        ws.column_dimensions["D"].width = 10
+        ws.column_dimensions["B"].width = 15
+        ws.column_dimensions["C"].width = 55
+        ws.column_dimensions["D"].width = 12
+        ws.column_dimensions["E"].width = 10
 
         for img_path, produtos in self._resultados.items():
             nome = Path(img_path).name
             for p, s, qty in produtos:
-                ws.append([nome, p, qty, round(s, 4)])
+                ref = sku_map.get(p, "")
+                ws.append([nome, ref, p, qty, round(s, 4)])
 
         wb.save(path)
         self._status("Excel exportado ✓", ok=True)

@@ -65,7 +65,9 @@ def barra(s, largura=20):
 def load_produtos():
     produtos = load_pickle(DATA_DIR / "prod.pkl")
     embeddings = np.load(DATA_DIR / "emb_prod.npy")
-    return produtos, embeddings
+    sku_map_path = DATA_DIR / "sku_map.pkl"
+    sku_map = load_pickle(sku_map_path) if sku_map_path.exists() else {}
+    return produtos, embeddings, sku_map
 
 # =========================
 # OCR
@@ -192,15 +194,37 @@ def encontrar_produtos_ia(trecho, produtos, emb_prod):
     scores.sort(key=lambda x: x[1], reverse=True)
     return scores[:3]
 
-def encontrar_produtos_levenshtein(trecho, produtos):
+def encontrar_produtos_levenshtein(trecho, produtos, freq_palavras=None):
     palavras_trecho = set(trecho.split())
     scores = []
     for p in produtos:
         palavras_produto = set(p.lower().split())
         s_set = fuzz.token_set_ratio(trecho, p.lower()) / 100
-        palavras_extra = palavras_produto - palavras_trecho
-        penalizacao = len(palavras_extra) * 0.06
-        s_final = max(0.0, s_set - penalizacao)
+
+        # Parear palavras com fuzzy matching para não penalizar typos (ex: tammy↔tawny)
+        matched_t, matched_p = set(), set()
+        for w_t in palavras_trecho:
+            if w_t in palavras_produto:
+                matched_t.add(w_t); matched_p.add(w_t)
+        for w_t in palavras_trecho - matched_t:
+            best_r, best_p = 0, None
+            for w_p in palavras_produto - matched_p:
+                r = fuzz.ratio(w_t, w_p)
+                if r > best_r:
+                    best_r, best_p = r, w_p
+            if best_r >= 58:
+                matched_t.add(w_t); matched_p.add(best_p)
+
+        # Penalizar apenas palavras verdadeiramente sem par
+        extra_produto = len(palavras_produto - matched_p) * 0.06
+        extra_trecho = 0.0
+        for w in palavras_trecho - matched_t:
+            freq = freq_palavras.get(w, 0) if freq_palavras else 0
+            # palavras comuns penalizam menos (ex: "maria" em muitos produtos)
+            especificidade = min(1.0, 1.0 / max(1, freq))
+            extra_trecho += 0.10 * especificidade
+
+        s_final = max(0.0, s_set - extra_produto - extra_trecho)
         scores.append((p, s_final))
     scores.sort(key=lambda x: x[1], reverse=True)
     return scores[:3]
@@ -222,7 +246,7 @@ def _match_trecho_best(
     candidatos = {}
     for p, s in encontrar_produtos_ia(trecho, produtos, emb_prod)[:3]:
         candidatos[p] = {"emb": s, "lev": 0}
-    for p, s in encontrar_produtos_levenshtein(trecho, produtos)[:3]:
+    for p, s in encontrar_produtos_levenshtein(trecho, produtos, freq_palavras)[:3]:
         if p not in candidatos:
             candidatos[p] = {"emb": 0, "lev": s}
         else:
@@ -247,8 +271,19 @@ def _match_trecho_best(
         threshold  = calcular_threshold(produto, freq_palavras, STOPWORDS)
         palavras_p = set(produto.lower().split())
 
-        if palavras_t - palavras_p:
-            continue
+        n_total = max(1, len(produtos))
+        sem_match = {
+            w for w in palavras_t
+            if w not in palavras_p
+            and not any(fuzz.ratio(w, p) >= 82 for p in palavras_p)
+            # palavras comuns (aparecem em muitos produtos) não bloqueiam o match
+            and freq_palavras.get(w, 0) < max(3, n_total * 0.01)
+        }
+        if sem_match:
+            # Fallback para typos multi-caracter (ex: "tammy"/"tawny"):
+            # aceita se apenas 1 palavra não fez match e a semelhança global é alta
+            if len(sem_match) > 1 or fuzz.token_sort_ratio(trecho.lower(), produto.lower()) < 85:
+                continue
         if len(palavras_t) >= 2:
             score = min(score + len(palavras_t) * 0.03, 1.0)
         if score < 0.85 and any(g in produto.lower() for g in PALAVRAS_GENERICAS):
@@ -358,18 +393,19 @@ def processar_linha(
 # =========================
 # EXCEL OUTPUT
 # =========================
-def _guardar_excel(resultados: dict, caminho: Path) -> None:
+def _guardar_excel(resultados: dict, caminho: Path, sku_map: dict = None) -> None:
     """
     Escreve os resultados num ficheiro Excel.
-    Colunas: Imagem | Produto | Quantidade | Score
+    Colunas: Imagem | Referência | Produto | Quantidade | Score
     Uma folha por execução, linhas agrupadas por imagem.
     """
+    sku_map = sku_map or {}
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Resultados"
 
     # Cabeçalho
-    ws.append(["Imagem", "Produto", "Quantidade", "Score"])
+    ws.append(["Imagem", "Referência", "Produto", "Quantidade", "Score"])
     header_font = openpyxl.styles.Font(bold=True)
     for cell in ws[1]:
         cell.font = header_font
@@ -377,13 +413,15 @@ def _guardar_excel(resultados: dict, caminho: Path) -> None:
     # Dados
     for imagem, produtos in resultados.items():
         for p, s, qty in produtos:
-            ws.append([imagem, p, qty, round(s, 4)])
+            ref = sku_map.get(p, "")
+            ws.append([imagem, ref, p, qty, round(s, 4)])
 
     # Largura das colunas
     ws.column_dimensions["A"].width = 30
-    ws.column_dimensions["B"].width = 55
-    ws.column_dimensions["C"].width = 12
-    ws.column_dimensions["D"].width = 10
+    ws.column_dimensions["B"].width = 15
+    ws.column_dimensions["C"].width = 55
+    ws.column_dimensions["D"].width = 12
+    ws.column_dimensions["E"].width = 10
 
     wb.save(caminho)
 
@@ -440,13 +478,16 @@ def processar_imagem(img_path: Path, produtos: list, emb_prod) -> list[tuple[str
 
     # Greedy expansion por linha; se o mesmo produto aparecer em várias linhas → score máximo
     melhor: dict[str, tuple[float, str]] = {}   # produto → (score, trecho)
-    for linha in linhas:
+    ordem:  dict[str, int] = {}                 # produto → índice da primeira linha onde apareceu
+    for i, linha in enumerate(linhas):
         for produto, score, trecho, *_ in processar_linha(linha, produtos, emb_prod, freq_palavras):
             if produto not in melhor or score > melhor[produto][0]:
                 melhor[produto] = (score, trecho)
+            if produto not in ordem:
+                ordem[produto] = i
 
     resultado = [(p, s, t) for p, (s, t) in melhor.items()]
-    resultado.sort(key=lambda x: x[1], reverse=True)
+    resultado.sort(key=lambda x: ordem.get(x[0], 0))
 
     # Filtro OCR
     def no_ocr(w):
@@ -464,7 +505,7 @@ def processar_imagem(img_path: Path, produtos: list, emb_prod) -> list[tuple[str
     subsumed = {p1 for p1, w1 in words.items()
                 for p2, w2 in words.items() if p1 != p2 and w1.issubset(w2)}
     resultado = [(p, s, t) for p, s, t in resultado if p not in subsumed]
-    resultado.sort(key=lambda x: x[1], reverse=True)
+    resultado.sort(key=lambda x: ordem.get(x[0], 0))
 
     return [(p, s, quantidade_para_produto(t, linhas, produto_nome=p))
             for p, s, t in resultado]
@@ -491,19 +532,22 @@ def processar_texto(texto: str, produtos: list, emb_prod) -> list[tuple[str, flo
     linhas        = _fundir_linhas_curtas(linhas, produtos, emb_prod, freq_palavras)
 
     melhor: dict[str, tuple[float, str]] = {}
-    for linha in linhas:
+    ordem:  dict[str, int] = {}
+    for i, linha in enumerate(linhas):
         for produto, score, trecho, *_ in processar_linha(linha, produtos, emb_prod, freq_palavras):
             if produto not in melhor or score > melhor[produto][0]:
                 melhor[produto] = (score, trecho)
+            if produto not in ordem:
+                ordem[produto] = i
 
     resultado = [(p, s, t) for p, (s, t) in melhor.items()]
-    resultado.sort(key=lambda x: x[1], reverse=True)
+    resultado.sort(key=lambda x: ordem.get(x[0], 0))
 
     words    = {p: set(p.lower().split()) - STOPWORDS for p, _, _ in resultado}
     subsumed = {p1 for p1, w1 in words.items()
                 for p2, w2 in words.items() if p1 != p2 and w1.issubset(w2)}
     resultado = [(p, s, t) for p, s, t in resultado if p not in subsumed]
-    resultado.sort(key=lambda x: x[1], reverse=True)
+    resultado.sort(key=lambda x: ordem.get(x[0], 0))
 
     return [(p, s, quantidade_para_produto(t, linhas, produto_nome=p))
             for p, s, t in resultado]
@@ -513,7 +557,7 @@ def processar_texto(texto: str, produtos: list, emb_prod) -> list[tuple[str, flo
 # PIPELINE (CLI com output detalhado)
 # =========================
 def run():
-    produtos, emb_prod = load_produtos()
+    produtos, emb_prod, sku_map = load_produtos()
     resultados = {}
 
     freq_palavras = calcular_freq_palavras(produtos, STOPWORDS)
@@ -542,8 +586,9 @@ def run():
         secao("GREEDY EXPANSION", C.BLUE)
 
         melhor_scores: dict[str, tuple[float, str]] = {}   # produto → (score, trecho)
+        ordem_scores:  dict[str, int] = {}                 # produto → índice da primeira linha
 
-        for linha in linhas:
+        for i, linha in enumerate(linhas):
             if all(w in STOPWORDS for w in linha.split()):
                 continue
 
@@ -555,10 +600,12 @@ def run():
             for produto, score, trecho, *_ in matches:
                 if produto not in melhor_scores or score > melhor_scores[produto][0]:
                     melhor_scores[produto] = (score, trecho)
+                if produto not in ordem_scores:
+                    ordem_scores[produto] = i
 
         # ---- FILTROS ----
         resultado_final = [(p, round(s, 4), t) for p, (s, t) in melhor_scores.items()]
-        resultado_final.sort(key=lambda x: x[1], reverse=True)
+        resultado_final.sort(key=lambda x: ordem_scores.get(x[0], 0))
 
         def palavra_no_ocr(palavra):
             return (palavra in ocr_tokens) if palavra.isalpha() \
@@ -593,7 +640,7 @@ def run():
             for p, sup in subsumed.items():
                 print(f"    {C.YELLOW}⊂{C.RESET} '{p}' contido em '{sup}' → removido")
         resultado_final = [(p, s, t) for p, s, t in resultado_final if p not in subsumed]
-        resultado_final.sort(key=lambda x: x[1], reverse=True)
+        resultado_final.sort(key=lambda x: ordem_scores.get(x[0], 0))
 
         resultado_com_qtd = [(p, s, quantidade_para_produto(t, linhas, produto_nome=p), t)
                              for p, s, t in resultado_final]
@@ -613,7 +660,7 @@ def run():
 
     # ---- GUARDAR E ABRIR EXCEL ----
     excel_path = OUTPUT_DIR / "resultados.xlsx"
-    _guardar_excel(resultados, excel_path)
+    _guardar_excel(resultados, excel_path, sku_map)
     print(f"\n{C.GREEN}{C.BOLD}  ✔ Resultados guardados em output/resultados.xlsx{C.RESET}\n")
     import subprocess, sys
     if sys.platform == "darwin":
