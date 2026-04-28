@@ -153,6 +153,42 @@ def calcular_freq_palavras(produtos, stopwords):
             freq[w] = freq.get(w, 0) + 1
     return freq
 
+def calcular_palavras_unicas(produtos: list) -> dict:
+    """
+    Mapeia cada palavra que aparece em exactamente um produto ao nome desse produto.
+    Usado para reconhecer abreviações: se a palavra é única no catálogo, o produto
+    é inequívoco mesmo quando o score está abaixo do threshold normal.
+    """
+    contagem: dict[str, int] = {}
+    produto_de: dict[str, str] = {}
+    for p in produtos:
+        for w in p.lower().split():
+            contagem[w] = contagem.get(w, 0) + 1
+            produto_de[w] = p
+    return {w: produto_de[w] for w, c in contagem.items() if c == 1}
+
+def _trecho_identifica_univocamente(palavras_t: set, produto: str, palavras_unicas: dict) -> bool:
+    """
+    True se alguma palavra ALFABÉTICA do trecho identifica univocamente este produto:
+    - match exacto: a palavra existe em apenas este produto no catálogo
+    - match fuzzy: a palavra aproxima-se (≥82) de uma palavra única deste produto
+    Números são excluídos — na mensagem indicam quantidade, não nome de produto.
+    Permite reconhecer abreviações e typos como 'princepezinho'→'principezinho'.
+    """
+    prod_lower = produto.lower()
+    prod_words = set(prod_lower.split())
+    for w in palavras_t:
+        if not w.isalpha():  # números (24, 36…) são quantidades, não identificadores
+            continue
+        if palavras_unicas.get(w) == prod_lower:
+            return True
+        for w_prod in prod_words:
+            if (w_prod in palavras_unicas
+                    and palavras_unicas[w_prod] == prod_lower
+                    and fuzz.ratio(w, w_prod) >= 82):
+                return True
+    return False
+
 def calcular_threshold(produto, freq_palavras, stopwords, base=0.82, penalidade=0.06):
     """
     Produtos com palavras muito comuns no catálogo (baixa especificidade)
@@ -255,7 +291,8 @@ def encontrar_produtos_levenshtein(trecho, produtos, freq_palavras=None):
 # GREEDY EXPANSION
 # =========================
 def _match_trecho_best(
-    trecho: str, produtos, emb_prod, freq_palavras
+    trecho: str, produtos, emb_prod, freq_palavras,
+    palavras_unicas: dict | None = None
 ) -> tuple[str, float, float, float] | None:
     """
     Avalia um trecho contra o catálogo.
@@ -313,13 +350,23 @@ def _match_trecho_best(
         if sem_match:
             # Fallback para typos multi-caracter (ex: "tammy"/"tawny"):
             # aceita se apenas 1 palavra não fez match e a semelhança global é alta
-            if len(sem_match) > 1 or fuzz.token_sort_ratio(trecho.lower(), produto.lower()) < 85:
+            if len(sem_match) > 1 or fuzz.token_sort_ratio(trecho.lower(), produto.lower()) < 88:
                 continue
         if len(palavras_t) >= 2:
             score = min(score + len(palavras_t) * 0.03, 1.0)
-        if score < 0.85 and any(g in produto.lower() for g in PALAVRAS_GENERICAS):
-            continue
-        if score <= threshold:
+
+        # Se uma palavra do trecho identifica univocamente este produto, os filtros
+        # de threshold e palavras genéricas não se aplicam (é uma abreviação válida).
+        is_unique = (palavras_unicas is not None
+                     and _trecho_identifica_univocamente(palavras_t, produto, palavras_unicas))
+
+        if not is_unique:
+            if score < 0.85 and any(g in produto.lower() for g in PALAVRAS_GENERICAS):
+                continue
+            if score <= threshold:
+                continue
+        elif score < 0.45:
+            # Para palavras únicas há zero ambiguidade; floor baixo evita só lixo total
             continue
         if score > melhor_s:
             melhor_s, melhor_p, melhor_emb, melhor_lev = score, produto, s_emb, s_lev
@@ -331,6 +378,7 @@ _LEADING_QTY = re.compile(r"^\d+\s+")
 def processar_linha(
     linha: str, produtos, emb_prod, freq_palavras,
     aliases: dict | None = None,
+    palavras_unicas: dict | None = None,
     verbose: bool = False
 ) -> list[tuple[str, float, str, float, float]]:
     """
@@ -380,7 +428,7 @@ def processar_linha(
                 break
 
             trecho = " ".join(palavras[i:j])
-            result = _match_trecho_best(trecho, produtos, emb_prod, freq_palavras)
+            result = _match_trecho_best(trecho, produtos, emb_prod, freq_palavras, palavras_unicas=palavras_unicas)
 
             if verbose:
                 if result:
@@ -417,10 +465,14 @@ def processar_linha(
             trecho_final = " ".join(palavras[i:end])
 
             if len(trecho_final.split()) == 1 and best[1] < 0.85:
-                if verbose:
-                    print(f"      {C.DIM}  → '{trecho_final}' rejeitado (1 palavra, score < 0.85){C.RESET}")
-                i += 1
-                continue
+                palavras_t_final = {w for w in trecho_final.split() if w not in STOPWORDS}
+                word_is_unique = (palavras_unicas is not None
+                                  and _trecho_identifica_univocamente(palavras_t_final, best[0], palavras_unicas))
+                if not word_is_unique:
+                    if verbose:
+                        print(f"      {C.DIM}  → '{trecho_final}' rejeitado (1 palavra, score < 0.85){C.RESET}")
+                    i += 1
+                    continue
 
             if verbose:
                 cor = score_cor(best[1])
@@ -489,7 +541,7 @@ PALAVRAS_GENERICAS = {"gel", "tips", "builder"}
 # =========================
 # FUSÃO DE LINHAS CURTAS
 # =========================
-def _fundir_linhas_curtas(linhas: list[str], produtos, emb_prod, freq_palavras, aliases=None) -> list[str]:
+def _fundir_linhas_curtas(linhas: list[str], produtos, emb_prod, freq_palavras, aliases=None, palavras_unicas=None) -> list[str]:
     """
     Linhas com 1-2 palavras significativas são fundidas com a linha ANTERIOR:
     - 1 palavra significativa → funde sempre (ex: 'transparente' é atributo do
@@ -508,7 +560,7 @@ def _fundir_linhas_curtas(linhas: list[str], produtos, emb_prod, freq_palavras, 
             continue
 
         if len(palavras_sig) == 2 and resultado:
-            matches = processar_linha(linha, produtos, emb_prod, freq_palavras, aliases=aliases)
+            matches = processar_linha(linha, produtos, emb_prod, freq_palavras, aliases=aliases, palavras_unicas=palavras_unicas)
             if not matches:
                 resultado[-1] = resultado[-1] + " " + linha_sem_qtd
                 continue
@@ -527,10 +579,11 @@ def processar_imagem(img_path: Path, produtos: list, emb_prod) -> list[tuple[str
     Usa greedy expansion com word consumption por linha (ver processar_linha).
     Sem output no terminal — para uso no app.
     """
-    aliases       = load_aliases()
-    freq_palavras = calcular_freq_palavras(produtos, STOPWORDS)
-    linhas        = extrair_linhas(img_path)
-    linhas        = _fundir_linhas_curtas(linhas, produtos, emb_prod, freq_palavras, aliases=aliases)
+    aliases        = load_aliases()
+    freq_palavras  = calcular_freq_palavras(produtos, STOPWORDS)
+    palavras_unicas = calcular_palavras_unicas(produtos)
+    linhas         = extrair_linhas(img_path)
+    linhas         = _fundir_linhas_curtas(linhas, produtos, emb_prod, freq_palavras, aliases=aliases, palavras_unicas=palavras_unicas)
 
     ocr_tokens, ocr_tokens_num = set(), set()
     for linha in linhas:
@@ -542,7 +595,7 @@ def processar_imagem(img_path: Path, produtos: list, emb_prod) -> list[tuple[str
     melhor: dict[str, tuple[float, str]] = {}   # produto → (score, trecho)
     ordem:  dict[str, int] = {}                 # produto → índice da primeira linha onde apareceu
     for i, linha in enumerate(linhas):
-        for produto, score, trecho, *_ in processar_linha(linha, produtos, emb_prod, freq_palavras, aliases=aliases):
+        for produto, score, trecho, *_ in processar_linha(linha, produtos, emb_prod, freq_palavras, aliases=aliases, palavras_unicas=palavras_unicas):
             if produto not in melhor or score > melhor[produto][0]:
                 melhor[produto] = (score, trecho)
             if produto not in ordem:
@@ -590,14 +643,15 @@ def processar_texto(texto: str, produtos: list, emb_prod) -> list[tuple[str, flo
         if linha:
             linhas.append(linha)
 
-    aliases       = load_aliases()
-    freq_palavras = calcular_freq_palavras(produtos, STOPWORDS)
-    linhas        = _fundir_linhas_curtas(linhas, produtos, emb_prod, freq_palavras, aliases=aliases)
+    aliases         = load_aliases()
+    freq_palavras   = calcular_freq_palavras(produtos, STOPWORDS)
+    palavras_unicas = calcular_palavras_unicas(produtos)
+    linhas          = _fundir_linhas_curtas(linhas, produtos, emb_prod, freq_palavras, aliases=aliases, palavras_unicas=palavras_unicas)
 
     melhor: dict[str, tuple[float, str]] = {}
     ordem:  dict[str, int] = {}
     for i, linha in enumerate(linhas):
-        for produto, score, trecho, *_ in processar_linha(linha, produtos, emb_prod, freq_palavras, aliases=aliases):
+        for produto, score, trecho, *_ in processar_linha(linha, produtos, emb_prod, freq_palavras, aliases=aliases, palavras_unicas=palavras_unicas):
             if produto not in melhor or score > melhor[produto][0]:
                 melhor[produto] = (score, trecho)
             if produto not in ordem:
@@ -624,7 +678,8 @@ def run():
     aliases   = load_aliases()
     resultados = {}
 
-    freq_palavras = calcular_freq_palavras(produtos, STOPWORDS)
+    freq_palavras   = calcular_freq_palavras(produtos, STOPWORDS)
+    palavras_unicas = calcular_palavras_unicas(produtos)
 
     for img in INPUT_DIR.iterdir():
         if img.suffix.lower() not in [".png", ".jpg", ".jpeg"]:
@@ -633,7 +688,7 @@ def run():
         header(f"IMAGEM: {img.name}", C.MAGENTA)
 
         linhas = extrair_linhas(img)
-        linhas = _fundir_linhas_curtas(linhas, produtos, emb_prod, freq_palavras, aliases=aliases)
+        linhas = _fundir_linhas_curtas(linhas, produtos, emb_prod, freq_palavras, aliases=aliases, palavras_unicas=palavras_unicas)
 
         # Tokens alfabéticos (match exato) e numéricos/unidades (fuzzy, ex: "30ml" ≈ "30m1")
         ocr_tokens, ocr_tokens_num = set(), set()
@@ -658,7 +713,7 @@ def run():
 
             print(f"\n  {C.DIM}linha:{C.RESET} {C.WHITE}'{linha}'{C.RESET}")
 
-            matches = processar_linha(linha, produtos, emb_prod, freq_palavras, aliases=aliases, verbose=True)
+            matches = processar_linha(linha, produtos, emb_prod, freq_palavras, aliases=aliases, palavras_unicas=palavras_unicas, verbose=True)
             if not matches:
                 print(f"    {C.DIM}(sem match){C.RESET}")
             for produto, score, trecho, *_ in matches:
