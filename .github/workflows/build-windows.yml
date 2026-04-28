@@ -23,7 +23,7 @@ jobs:
           pip install pyinstaller
 
       - name: Pré-descarregar modelos EasyOCR (ficam embutidos no exe)
-        run: python -c "import easyocr; easyocr.Reader(['pt'], gpu=False)"
+        run: python -X utf8 -c "import easyocr; easyocr.Reader(['pt'], gpu=False)"
 
       - name: Build
         run: pyinstaller app.spec
