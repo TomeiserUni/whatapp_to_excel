@@ -4,10 +4,10 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 block_cipher = None
 
 datas = [
-    ("data",            "data"),
-    ("src/utils.py",    "src"),
-    ("src/parser.py",   "src"),
-    ("src/pipeline.py", "src"),
+    ("../data",            "data"),
+    ("../src/utils.py",    "src"),
+    ("../src/parser.py",   "src"),
+    ("../src/pipeline.py", "src"),
 ]
 datas += collect_data_files("customtkinter")
 datas += collect_data_files("easyocr")
@@ -21,8 +21,8 @@ hiddenimports = (
 )
 
 a = Analysis(
-    ["src/app.py"],
-    pathex=["."],
+    ["../src/app.py"],
+    pathex=[".."],
     binaries=[],
     datas=datas,
     hiddenimports=hiddenimports,
