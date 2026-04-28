@@ -1,3 +1,4 @@
+flask
 easyocr==1.7.2
 sentence-transformers==5.4.0
 customtkinter==5.2.2
