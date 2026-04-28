@@ -1,0 +1,7 @@
+flask
+waitress
+openai
+openpyxl
+rapidfuzz
+Pillow
+python-dotenv

@@ -39,14 +39,27 @@ def _load_pipeline():
     global _pipeline
     from dotenv import load_dotenv
     load_dotenv()
-    import pipeline as pl
+
     api_key = os.environ.get("NVIDIA_API_KEY")
-    if api_key:
-        pl.init_ai_client(api_key)
-        print("[AI] Cliente NVIDIA inicializado.")
-    produtos, emb_prod, sku_map = pl.load_produtos()
-    _pipeline = {"pl": pl, "produtos": produtos,
-                 "emb_prod": emb_prod, "sku_map": sku_map}
+
+    if IS_CLOUD:
+        # Cloud: pipeline leve via NVIDIA API (sem torch/easyocr)
+        from openai import OpenAI
+        import ai_pipeline as pl
+        client = OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=api_key)
+        produtos, sku_map = pl.load_produtos(_BUNDLE / "data")
+        _pipeline = {"pl": pl, "produtos": produtos, "emb_prod": None,
+                     "sku_map": sku_map, "ai_client": client}
+    else:
+        # Local: pipeline completo com embeddings + EasyOCR
+        import pipeline as pl
+        if api_key:
+            pl.init_ai_client(api_key)
+            print("[AI] Cliente NVIDIA inicializado.")
+        produtos, emb_prod, sku_map = pl.load_produtos()
+        _pipeline = {"pl": pl, "produtos": produtos,
+                     "emb_prod": emb_prod, "sku_map": sku_map, "ai_client": None}
+
     print("[pipeline] Pronto.")
 
 
@@ -75,7 +88,10 @@ def processar():
             f.save(tmp.name)
             tmp_path = Path(tmp.name)
         try:
-            rows = pl["pl"].processar_imagem(tmp_path, pl["produtos"], pl["emb_prod"])
+            if IS_CLOUD:
+                rows = pl["pl"].processar_imagem(tmp_path, pl["produtos"], pl["ai_client"])
+            else:
+                rows = pl["pl"].processar_imagem(tmp_path, pl["produtos"], pl["emb_prod"])
             for produto, score, qty in rows:
                 resultados.append({
                     "ficheiro": f.filename,
@@ -100,7 +116,10 @@ def processar_texto():
         return jsonify([])
 
     pl = _pipeline
-    rows = pl["pl"].processar_texto(texto, pl["produtos"], pl["emb_prod"])
+    if IS_CLOUD:
+        rows = pl["pl"].processar_texto(texto, pl["produtos"], pl["ai_client"])
+    else:
+        rows = pl["pl"].processar_texto(texto, pl["produtos"], pl["emb_prod"])
     return jsonify([{
         "ficheiro": "texto colado",
         "produto":  p,
