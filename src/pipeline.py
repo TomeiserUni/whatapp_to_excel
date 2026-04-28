@@ -25,7 +25,7 @@ else:
 DATA_DIR   = _BUNDLE   / "data"
 INPUT_DIR  = _USER_DIR / "input"
 OUTPUT_DIR = _USER_DIR / "output"
-OUTPUT_DIR.mkdir(exist_ok=True)
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # =========================
 # MODELOS

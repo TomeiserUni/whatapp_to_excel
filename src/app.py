@@ -51,7 +51,7 @@ else:
 DATA_DIR   = _BUNDLE   / "data"
 OUTPUT_DIR = _USER_DIR / "output"
 CACHE_PATH = _USER_DIR / "cache.pkl"
-OUTPUT_DIR.mkdir(exist_ok=True)
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
