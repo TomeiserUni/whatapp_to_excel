@@ -1,25 +1,22 @@
-# app.spec — PyInstaller spec para Windows
-# Build: pyinstaller app.spec
-# Resultado: dist/WhatsAppExcel/  (pasta, não ficheiro único — mais rápido a arrancar)
+# app.spec — PyInstaller onefile para Windows
+# Build automático: faz push com tag   git tag v1.0 && git push --tags
+# O .exe aparece nos artefactos do GitHub Actions
 
-import os
-from pathlib import Path
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 block_cipher = None
 
-# Dados a incluir (modelos, pkl, assets UI)
-added_datas = [
-    ("data",           "data"),
-    ("src/utils.py",   "src"),
-    ("src/parser.py",  "src"),
-    ("src/pipeline.py","src"),
+datas = [
+    ("data",            "data"),
+    ("src/utils.py",    "src"),
+    ("src/parser.py",   "src"),
+    ("src/pipeline.py", "src"),
 ]
-added_datas += collect_data_files("customtkinter")
-added_datas += collect_data_files("easyocr")
-added_datas += collect_data_files("tkinterdnd2")
+datas += collect_data_files("customtkinter")
+datas += collect_data_files("easyocr")
+datas += collect_data_files("tkinterdnd2")
 
-hidden = (
+hiddenimports = (
     collect_submodules("easyocr") +
     collect_submodules("sentence_transformers") +
     collect_submodules("customtkinter") +
@@ -30,33 +27,25 @@ a = Analysis(
     ["src/app.py"],
     pathex=["."],
     binaries=[],
-    datas=added_datas,
-    hiddenimports=hidden,
-    hookspath=[],
-    hooksconfig={},
-    runtime_hooks=[],
+    datas=datas,
+    hiddenimports=hiddenimports,
     excludes=["matplotlib", "notebook", "IPython", "jupyter"],
     cipher=block_cipher,
 )
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
+# Tudo num único .exe  (extrai para %TEMP% ao arrancar — demora ~15s na primeira vez)
 exe = EXE(
-    pyz, a.scripts, [],
-    exclude_binaries=True,
+    pyz,
+    a.scripts,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
     name="WhatsAppExcel",
     debug=False,
-    bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=False,   # sem janela de terminal
+    console=False,
     icon=None,
-)
-
-coll = COLLECT(
-    exe, a.binaries, a.zipfiles, a.datas,
-    strip=False,
-    upx=True,
-    upx_exclude=[],
-    name="WhatsAppExcel",
 )

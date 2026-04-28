@@ -2,8 +2,8 @@ name: Build Windows EXE
 
 on:
   push:
-    tags: ["v*"]          # dispara ao criar tag: git tag v1.0 && git push --tags
-  workflow_dispatch:       # ou manualmente no GitHub → Actions → Run workflow
+    tags: ["v*"]        # git tag v1.0 && git push --tags
+  workflow_dispatch:    # ou manualmente: GitHub → Actions → Run workflow
 
 jobs:
   build:
@@ -16,28 +16,21 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Instalar PyTorch CPU
-        run: |
-          pip install torch==2.0.1+cpu --extra-index-url https://download.pytorch.org/whl/cpu
-
       - name: Instalar dependências
         run: |
+          pip install torch==2.0.1+cpu --extra-index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements.txt
           pip install pyinstaller
 
-      - name: Pré-descarregar modelos EasyOCR
+      - name: Pré-descarregar modelos EasyOCR (ficam embutidos no exe)
         run: python -c "import easyocr; easyocr.Reader(['pt'], gpu=False)"
 
-      - name: Build com PyInstaller
+      - name: Build
         run: pyinstaller app.spec
 
-      - name: Compactar resultado
-        run: |
-          Compress-Archive -Path dist\WhatsAppExcel -DestinationPath WhatsAppExcel-windows.zip
-
-      - name: Upload artefacto
+      - name: Upload WhatsAppExcel.exe
         uses: actions/upload-artifact@v4
         with:
           name: WhatsAppExcel-windows
-          path: WhatsAppExcel-windows.zip
+          path: dist/WhatsAppExcel.exe
           retention-days: 30
