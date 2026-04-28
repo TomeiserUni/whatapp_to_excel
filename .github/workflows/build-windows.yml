@@ -24,9 +24,6 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
-      - name: Pré-descarregar modelos EasyOCR (ficam embutidos no exe)
-        run: python -c "import sys; sys.stdout.reconfigure(encoding='utf-8', errors='replace'); import easyocr; easyocr.Reader(['pt'], gpu=False)"
-
       - name: Build
         run: pyinstaller app.spec
 
