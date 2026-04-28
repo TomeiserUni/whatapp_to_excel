@@ -11,6 +11,15 @@
   header { background: #16213e; padding: 14px 24px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #0f3460; }
   header h1 { font-size: 1.2rem; color: #4fc3f7; font-weight: 600; }
   #status-bar { font-size: 0.85rem; display: flex; align-items: center; gap: 8px; }
+  #settings-modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 200; align-items: center; justify-content: center; }
+  #settings-modal.visible { display: flex; }
+  #settings-box { background: #16213e; border: 1px solid #0f3460; border-radius: 12px; padding: 24px; width: 420px; max-width: 90vw; }
+  #settings-box h3 { color: #4fc3f7; margin-bottom: 16px; font-size: 1rem; }
+  #settings-box label { font-size: .85rem; color: #90caf9; display: block; margin-bottom: 6px; }
+  .key-row { display: flex; gap: 8px; }
+  .key-row input { flex: 1; padding: 8px 12px; background: #0f3460; border: 1px solid #1565c0; border-radius: 7px; color: #e0e0e0; font-size: .88rem; }
+  #key-status { font-size: .8rem; margin-top: 8px; min-height: 18px; }
+  .settings-actions { display: flex; gap: 8px; margin-top: 16px; justify-content: flex-end; }
   #status-dot { width: 10px; height: 10px; border-radius: 50%; background: #ffa726; animation: pulse 1s infinite; }
   #status-dot.ready { background: #66bb6a; animation: none; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
@@ -71,8 +80,25 @@
   <div id="status-bar">
     <div id="status-dot"></div>
     <span id="status-txt">A carregar modelos…</span>
+    <button class="btn-secondary" onclick="abrirSettings()" style="padding:5px 10px; font-size:.8rem; margin-left:12px;">⚙ Definições</button>
   </div>
 </header>
+
+<div id="settings-modal">
+  <div id="settings-box">
+    <h3>Definições</h3>
+    <label>NVIDIA API Key</label>
+    <div class="key-row">
+      <input id="api-key-input" type="password" placeholder="nvapi-…">
+      <button class="btn-secondary" onclick="toggleShowKey()">👁</button>
+    </div>
+    <div id="key-status"></div>
+    <div class="settings-actions">
+      <button class="btn-secondary" onclick="fecharSettings()">Cancelar</button>
+      <button class="btn-primary" onclick="guardarKey()">Guardar</button>
+    </div>
+  </div>
+</div>
 
 <main>
   <div id="left">
@@ -262,6 +288,50 @@ function mostrarLoading(txt) {
 function esconderLoading() {
   document.getElementById('loading-overlay').classList.remove('visible');
 }
+
+// ── Definições / API Key ──────────────────────────────────────
+async function abrirSettings() {
+  const r = await fetch('/config');
+  const d = await r.json();
+  const statusEl = document.getElementById('key-status');
+  statusEl.textContent = d.configured ? 'Chave já configurada.' : 'Sem chave configurada.';
+  statusEl.style.color = d.configured ? '#66bb6a' : '#ffa726';
+  document.getElementById('api-key-input').value = '';
+  document.getElementById('settings-modal').classList.add('visible');
+}
+
+function fecharSettings() {
+  document.getElementById('settings-modal').classList.remove('visible');
+}
+
+function toggleShowKey() {
+  const input = document.getElementById('api-key-input');
+  input.type = input.type === 'password' ? 'text' : 'password';
+}
+
+async function guardarKey() {
+  const key = document.getElementById('api-key-input').value.trim();
+  if (!key) { alert('Introduz uma chave válida.'); return; }
+  const r = await fetch('/config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ api_key: key })
+  });
+  const d = await r.json();
+  const statusEl = document.getElementById('key-status');
+  if (d.ok) {
+    statusEl.textContent = 'Chave guardada com sucesso!';
+    statusEl.style.color = '#66bb6a';
+    setTimeout(fecharSettings, 1500);
+  } else {
+    statusEl.textContent = d.error || 'Erro ao guardar.';
+    statusEl.style.color = '#ef5350';
+  }
+}
+
+document.getElementById('settings-modal').addEventListener('click', function(e) {
+  if (e.target === this) fecharSettings();
+});
 </script>
 </body>
 </html>

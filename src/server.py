@@ -74,6 +74,27 @@ def status():
     return jsonify({"ready": _pipeline is not None})
 
 
+@app.route("/config", methods=["GET"])
+def get_config():
+    key = os.environ.get("NVIDIA_API_KEY", "")
+    return jsonify({"configured": bool(key)})
+
+
+@app.route("/config", methods=["POST"])
+def set_config():
+    data = request.json or {}
+    key = data.get("api_key", "").strip()
+    if not key:
+        return jsonify({"error": "Chave vazia"}), 400
+    env_path = _USER_DIR / ".env"
+    from dotenv import set_key as dotenv_set_key
+    dotenv_set_key(str(env_path), "NVIDIA_API_KEY", key)
+    os.environ["NVIDIA_API_KEY"] = key
+    if _pipeline is not None and not IS_CLOUD:
+        _pipeline["pl"].init_ai_client(key)
+    return jsonify({"ok": True})
+
+
 @app.route("/processar", methods=["POST"])
 def processar():
     if _pipeline is None:
