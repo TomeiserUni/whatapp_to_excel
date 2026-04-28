@@ -1,0 +1,36 @@
+name: Build Windows EXE
+
+on:
+  push:
+    tags: ["v*"]        # git tag v1.0 && git push --tags
+  workflow_dispatch:    # ou manualmente: GitHub → Actions → Run workflow
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependências
+        run: |
+          pip install torch==2.0.1+cpu --extra-index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Pré-descarregar modelos EasyOCR (ficam embutidos no exe)
+        run: python -c "import easyocr; easyocr.Reader(['pt'], gpu=False)"
+
+      - name: Build
+        run: pyinstaller app.spec
+
+      - name: Upload WhatsAppExcel.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: WhatsAppExcel-windows
+          path: dist/WhatsAppExcel.exe
+          retention-days: 30
