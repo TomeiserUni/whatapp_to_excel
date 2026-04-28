@@ -58,13 +58,8 @@ def quantidade_para_produto(melhor_trecho: str, linhas: list[str], produto_nome:
                 return int(n)
         return None
 
-    # 1. "N cada" — quantidade global para todos os produtos da mensagem
-    for linha in linhas:
-        m = _QTDE_CADA.search(linha)
-        if m and m.group(1) not in nums_produto:
-            return int(m.group(1))
-
-    # 2. Quantidade na linha onde o produto foi detectado
+    # Quantidade na linha onde o produto foi detectado
+    # ("N cada" também é captado aqui pelo _qty_excluindo_produto via vizinho "cada")
     palavras = set(melhor_trecho.lower().split())
     for linha in linhas:
         if palavras.issubset(set(linha.lower().split())):

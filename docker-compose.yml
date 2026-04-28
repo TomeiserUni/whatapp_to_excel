@@ -1,0 +1,8 @@
+services:
+  whatsapp-excel:
+    build: .
+    volumes:
+      - ./input:/app/input      # coloca as imagens aqui
+      - ./output:/app/output    # o Excel aparece aqui
+    environment:
+      - PYTHONUNBUFFERED=1

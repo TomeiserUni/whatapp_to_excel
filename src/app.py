@@ -3,6 +3,7 @@ App com drag-and-drop para processar imagens WhatsApp e exportar para Excel.
 Correr: conda activate whatsapp_to_excel && python src/app.py
 """
 import hashlib
+import os
 import pickle
 import subprocess
 import sys
@@ -320,7 +321,12 @@ class App(TkinterDnD.Tk):
 
         wb.save(path)
         self._status("Excel exportado ✓", ok=True)
-        subprocess.run(["open", path])
+        if sys.platform == "darwin":
+            subprocess.run(["open", path])
+        elif sys.platform == "win32":
+            os.startfile(path)
+        else:
+            subprocess.run(["xdg-open", path])
 
     # ── LIMPAR ────────────────────────────────────────────────────
     def _limpar(self):

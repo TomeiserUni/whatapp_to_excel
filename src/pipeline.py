@@ -365,8 +365,10 @@ def _match_trecho_best(
                 continue
             if score <= threshold:
                 continue
-        elif score < 0.45:
-            # Para palavras únicas há zero ambiguidade; floor baixo evita só lixo total
+        elif score < 0.75:
+            # Para palavras únicas o floor reflecte o custo máximo de palavras extra:
+            # produtos até 4 palavras extra (ex: "verniz gel maria X") → score ≥ 0.76
+            # produtos com 5+ palavras extra (ex: "verniz gel dancar ate ser dia") → score < 0.76 → rejeitado
             continue
         if score > melhor_s:
             melhor_s, melhor_p, melhor_emb, melhor_lev = score, produto, s_emb, s_lev
