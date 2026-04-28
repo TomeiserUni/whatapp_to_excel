@@ -1,9 +1,9 @@
-name: Build Windows EXE
+name: Build Windows Installer
 
 on:
   push:
-    tags: ["v*"]        # git tag v1.0 && git push --tags
-  workflow_dispatch:    # ou manualmente: GitHub → Actions → Run workflow
+    tags: ["v*"]
+  workflow_dispatch:
 
 jobs:
   build:
@@ -20,16 +20,20 @@ jobs:
 
       - name: Instalar dependências
         run: |
-         pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install torch==2.0.1+cpu --extra-index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements.txt
           pip install pyinstaller
 
-      - name: Build
+      - name: Build exe
         run: pyinstaller app.spec
 
-      - name: Upload WhatsAppExcel.exe
+      - name: Criar instalador (Inno Setup)
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
+
+      - name: Upload instalador
         uses: actions/upload-artifact@v4
         with:
-          name: WhatsAppExcel-windows
-          path: dist/WhatsAppExcel.exe
+          name: WhatsAppExcel-Instalador
+          path: dist\WhatsAppExcel_Instalador.exe
           retention-days: 30

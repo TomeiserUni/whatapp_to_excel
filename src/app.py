@@ -8,8 +8,31 @@ import pickle
 import subprocess
 import sys
 import threading
+import traceback
 from pathlib import Path
 from tkinter import filedialog, ttk
+
+
+# ── Crash log (captura erros invisíveis no exe sem consola) ──────
+def _crash_log(exc_type, exc_val, exc_tb):
+    log = Path.home() / "Desktop" / "whatsapp_excel_erro.txt"
+    try:
+        log.write_text("".join(traceback.format_exception(exc_type, exc_val, exc_tb)),
+                       encoding="utf-8")
+    except Exception:
+        pass
+    try:
+        import tkinter as tk
+        import tkinter.messagebox as mb
+        r = tk.Tk(); r.withdraw()
+        mb.showerror("Erro ao arrancar",
+                     f"Ocorreu um erro.\nDetalhes guardados em:\n{log}")
+        r.destroy()
+    except Exception:
+        pass
+
+sys.excepthook = _crash_log
+
 
 import customtkinter as ctk
 import openpyxl
@@ -17,10 +40,17 @@ from tkinterdnd2 import DND_FILES, TkinterDnD
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-BASE_DIR  = Path(__file__).resolve().parent.parent
-DATA_DIR  = BASE_DIR / "data"
-OUTPUT_DIR = BASE_DIR / "output"
-CACHE_PATH = DATA_DIR / "cache.pkl"
+# ── Caminhos compatíveis com exe PyInstaller e execução normal ───
+if getattr(sys, "frozen", False):
+    _BUNDLE   = Path(sys._MEIPASS)
+    _USER_DIR = Path.home() / "WhatsAppExcel"   # Documentos do utilizador
+else:
+    _BUNDLE   = Path(__file__).resolve().parent.parent
+    _USER_DIR = _BUNDLE
+
+DATA_DIR   = _BUNDLE   / "data"
+OUTPUT_DIR = _USER_DIR / "output"
+CACHE_PATH = _USER_DIR / "cache.pkl"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 ctk.set_appearance_mode("dark")
@@ -71,7 +101,12 @@ class App(TkinterDnD.Tk):
         self.drop_target_register(DND_FILES)
         self.dnd_bind("<<Drop>>", self._on_drop)
 
-        self._status("A carregar modelos OCR + NLP…", loading=True)
+        primeira_vez = not (Path.home() / ".EasyOCR" / "model" / "craft_mlt_25k.pth").exists()
+        if primeira_vez:
+            msg = "Primeira execução: a descarregar modelos (~100 MB, pode demorar 2-3 min)…"
+        else:
+            msg = "A carregar modelos OCR + NLP…"
+        self._status(msg, loading=True)
         threading.Thread(target=self._load_pipeline, daemon=True).start()
 
     # ── PIPELINE LOAD ─────────────────────────────────────────────

@@ -1,4 +1,5 @@
 from pathlib import Path
+import sys
 import json
 import numpy as np
 import easyocr
@@ -14,10 +15,16 @@ from parser import quantidade_para_produto
 # =========================
 # PATHS
 # =========================
-BASE_DIR = Path(__file__).resolve().parent.parent
-DATA_DIR = BASE_DIR / "data"
-INPUT_DIR = BASE_DIR / "input"
-OUTPUT_DIR = BASE_DIR / "output"
+if getattr(sys, "frozen", False):
+    _BUNDLE   = Path(sys._MEIPASS)
+    _USER_DIR = Path.home() / "WhatsAppExcel"
+else:
+    _BUNDLE   = Path(__file__).resolve().parent.parent
+    _USER_DIR = _BUNDLE
+
+DATA_DIR   = _BUNDLE   / "data"
+INPUT_DIR  = _USER_DIR / "input"
+OUTPUT_DIR = _USER_DIR / "output"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 # =========================
