@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.11-slim-bookworm
 
 WORKDIR /app
 
@@ -9,8 +9,6 @@ COPY src/ ./src/
 COPY data/prod.pkl    ./data/
 COPY data/sku_map.pkl ./data/
 COPY data/aliases.json ./data/
-
-RUN mkdir -p output
 
 ENV PYTHONUNBUFFERED=1
 ENV RAILWAY_ENVIRONMENT=production
