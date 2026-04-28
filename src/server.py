@@ -1,12 +1,19 @@
+import io
+import os
 import sys
+import tempfile
 import threading
 import webbrowser
 from pathlib import Path
 
 from flask import Flask, jsonify, render_template, request, send_file
 
-# ── Caminhos ────────────────────────────────────────────────────
-if getattr(sys, "frozen", False):
+# ── Ambiente ─────────────────────────────────────────────────────
+IS_CLOUD  = bool(os.environ.get("RAILWAY_ENVIRONMENT") or os.environ.get("RENDER"))
+IS_FROZEN = getattr(sys, "frozen", False)
+
+# ── Caminhos ─────────────────────────────────────────────────────
+if IS_FROZEN:
     _BUNDLE   = Path(sys._MEIPASS)
     _USER_DIR = Path.home() / "WhatsAppExcel"
 else:
@@ -15,10 +22,12 @@ else:
 
 sys.path.insert(0, str(_BUNDLE / "src"))
 
-OUTPUT_DIR = _USER_DIR / "output"
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+# Na cloud o output é em memória; localmente usa pasta
+OUTPUT_DIR = None if IS_CLOUD else _USER_DIR / "output"
+if OUTPUT_DIR:
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-# ── Flask ────────────────────────────────────────────────────────
+# ── Flask ─────────────────────────────────────────────────────────
 template_folder = str(_BUNDLE / "src" / "templates")
 app = Flask(__name__, template_folder=template_folder)
 app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50 MB
@@ -28,13 +37,20 @@ _pipeline = None
 
 def _load_pipeline():
     global _pipeline
+    from dotenv import load_dotenv
+    load_dotenv()
     import pipeline as pl
+    api_key = os.environ.get("NVIDIA_API_KEY")
+    if api_key:
+        pl.init_ai_client(api_key)
+        print("[AI] Cliente NVIDIA inicializado.")
     produtos, emb_prod, sku_map = pl.load_produtos()
     _pipeline = {"pl": pl, "produtos": produtos,
                  "emb_prod": emb_prod, "sku_map": sku_map}
+    print("[pipeline] Pronto.")
 
 
-# ── Rotas ────────────────────────────────────────────────────────
+# ── Rotas ─────────────────────────────────────────────────────────
 @app.route("/")
 def index():
     return render_template("index.html")
@@ -55,10 +71,11 @@ def processar():
     resultados = []
 
     for f in files:
-        tmp = OUTPUT_DIR / f.filename
-        f.save(tmp)
+        with tempfile.NamedTemporaryFile(suffix=Path(f.filename).suffix, delete=False) as tmp:
+            f.save(tmp.name)
+            tmp_path = Path(tmp.name)
         try:
-            rows = pl["pl"].processar_imagem(tmp, pl["produtos"], pl["emb_prod"])
+            rows = pl["pl"].processar_imagem(tmp_path, pl["produtos"], pl["emb_prod"])
             for produto, score, qty in rows:
                 resultados.append({
                     "ficheiro": f.filename,
@@ -68,7 +85,7 @@ def processar():
                     "ref":      pl["sku_map"].get(produto, ""),
                 })
         finally:
-            tmp.unlink(missing_ok=True)
+            tmp_path.unlink(missing_ok=True)
 
     return jsonify(resultados)
 
@@ -110,13 +127,19 @@ def exportar():
     ws.column_dimensions["E"].width = 10
     for row in data:
         ws.append([row["ficheiro"], row["ref"], row["produto"], row["qtd"], row["score"]])
-    path = OUTPUT_DIR / "resultados.xlsx"
-    wb.save(path)
-    return send_file(path, as_attachment=True, download_name="resultados.xlsx")
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return send_file(buf, as_attachment=True, download_name="resultados.xlsx",
+                     mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
-# ── Main ─────────────────────────────────────────────────────────
+# ── Main ──────────────────────────────────────────────────────────
 if __name__ == "__main__":
     threading.Thread(target=_load_pipeline, daemon=True).start()
-    threading.Timer(1.5, lambda: webbrowser.open("http://localhost:5000")).start()
-    app.run(port=5000, debug=False, use_reloader=False)
+    PORT = int(os.environ.get("PORT", 5000 if sys.platform == "win32" else 5001))
+    HOST = "0.0.0.0" if IS_CLOUD else "127.0.0.1"
+    if not IS_CLOUD:
+        threading.Timer(1.5, lambda: webbrowser.open(f"http://localhost:{PORT}")).start()
+    from waitress import serve
+    serve(app, host=HOST, port=PORT)
