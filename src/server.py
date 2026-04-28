@@ -47,9 +47,9 @@ def _load_pipeline():
         from openai import OpenAI
         import ai_pipeline as pl
         client = OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=api_key)
-        produtos, sku_map = pl.load_produtos(_BUNDLE / "data")
+        produtos, sku_map, aliases = pl.load_produtos(_BUNDLE / "data")
         _pipeline = {"pl": pl, "produtos": produtos, "emb_prod": None,
-                     "sku_map": sku_map, "ai_client": client}
+                     "sku_map": sku_map, "aliases": aliases, "ai_client": client}
     else:
         # Local: pipeline completo com embeddings + EasyOCR
         import pipeline as pl
@@ -58,7 +58,7 @@ def _load_pipeline():
             print("[AI] Cliente NVIDIA inicializado.")
         produtos, emb_prod, sku_map = pl.load_produtos()
         _pipeline = {"pl": pl, "produtos": produtos,
-                     "emb_prod": emb_prod, "sku_map": sku_map, "ai_client": None}
+                     "emb_prod": emb_prod, "sku_map": sku_map, "aliases": {}, "ai_client": None}
 
     print("[pipeline] Pronto.")
 
@@ -110,7 +110,7 @@ def processar():
             tmp_path = Path(tmp.name)
         try:
             if IS_CLOUD:
-                rows = pl["pl"].processar_imagem(tmp_path, pl["produtos"], pl["ai_client"])
+                rows = pl["pl"].processar_imagem(tmp_path, pl["produtos"], pl["sku_map"], pl["aliases"], pl["ai_client"])
             else:
                 rows = pl["pl"].processar_imagem(tmp_path, pl["produtos"], pl["emb_prod"])
             for produto, score, qty in rows:
@@ -138,7 +138,7 @@ def processar_texto():
 
     pl = _pipeline
     if IS_CLOUD:
-        rows = pl["pl"].processar_texto(texto, pl["produtos"], pl["ai_client"])
+        rows = pl["pl"].processar_texto(texto, pl["produtos"], pl["sku_map"], pl["aliases"], pl["ai_client"])
     else:
         rows = pl["pl"].processar_texto(texto, pl["produtos"], pl["emb_prod"])
     return jsonify([{

@@ -15,7 +15,26 @@ def load_produtos(data_dir: Path):
             sku_map = pickle.load(f)
     except FileNotFoundError:
         sku_map = {}
-    return produtos, sku_map
+    try:
+        with open(data_dir / "aliases.json") as f:
+            aliases = json.load(f)
+    except FileNotFoundError:
+        aliases = {}
+    return produtos, sku_map, aliases
+
+
+def _build_catalogo(candidatos: list, sku_map: dict) -> str:
+    return "\n".join(f"- {p} (REF: {sku_map.get(p, 'N/D')})" for p in candidatos)
+
+
+def _build_aliases_txt(aliases: dict, sku_map: dict) -> str:
+    if not aliases:
+        return ""
+    lines = "\n".join(
+        f'  "{k}" → {v} (REF: {sku_map.get(v, "N/D")})'
+        for k, v in aliases.items()
+    )
+    return f"\nNomes alternativos conhecidos:\n{lines}\n"
 
 
 def _match_produto(nome_ai: str, produtos: list) -> str | None:
@@ -38,16 +57,20 @@ def _parse_json(texto: str) -> list:
         return []
 
 
-def processar_imagem(image_path: Path, produtos: list, client) -> list:
+def processar_imagem(image_path: Path, produtos: list, sku_map: dict, aliases: dict, client) -> list:
     ext  = image_path.suffix.lower().lstrip(".")
     mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png"}.get(ext, "image/jpeg")
     with open(image_path, "rb") as f:
         img_b64 = base64.b64encode(f.read()).decode()
 
-    catalogo = "\n".join(f"- {p}" for p in produtos)
+    # Catálogo compacto (sem REF) para poupar tokens no modelo de visão
+    catalogo_compacto = "\n".join(f"- {p}" for p in produtos)
+    alias_txt = _build_aliases_txt(aliases, sku_map)
+
     prompt = (
         "Esta imagem é uma mensagem WhatsApp com uma encomenda de vernizes/produtos de unhas.\n\n"
-        f"Catálogo disponível:\n{catalogo}\n\n"
+        f"Catálogo disponível:\n{catalogo_compacto}\n"
+        f"{alias_txt}\n"
         "Identifica os produtos encomendados e as quantidades.\n"
         'Responde APENAS com JSON válido: [{"produto": "nome exato do catálogo", "quantidade": número}]\n'
         "Se não houver produtos reconhecíveis, responde []."
@@ -75,13 +98,20 @@ def processar_imagem(image_path: Path, produtos: list, client) -> list:
     ]
 
 
-def processar_texto(texto: str, produtos: list, client) -> list:
-    catalogo = "\n".join(f"- {p}" for p in produtos)
+def processar_texto(texto: str, produtos: list, sku_map: dict, aliases: dict, client) -> list:
+    # Pré-filtrar os 40 candidatos mais prováveis para reduzir tokens
+    top = process.extract(texto, produtos, scorer=fuzz.token_set_ratio, limit=40)
+    candidatos = [r[0] for r in top] if top else produtos[:40]
+
+    catalogo = _build_catalogo(candidatos, sku_map)
+    alias_txt = _build_aliases_txt(aliases, sku_map)
+
     prompt = (
-        f"Catálogo de produtos de vernizes/unhas:\n{catalogo}\n\n"
+        f"Catálogo de produtos de vernizes/unhas (nome + referência):\n{catalogo}\n"
+        f"{alias_txt}\n"
         f"Mensagem de encomenda:\n{texto}\n\n"
-        "Identifica os produtos e quantidades.\n"
-        'Responde APENAS com JSON válido: [{"produto": "nome exato do catálogo", "quantidade": número}]\n'
+        "Identifica os produtos e quantidades. Usa o nome EXATO do catálogo.\n"
+        'Responde APENAS com JSON válido: [{"produto": "nome exato do catálogo", "referencia": "REF", "quantidade": número}]\n'
         "Se não houver produtos, responde []."
     )
 
