@@ -449,11 +449,11 @@ def _match_trecho_best(
         if score > melhor_s:
             melhor_s, melhor_p, melhor_emb, melhor_lev = score, produto, s_emb, s_lev
 
-    # Complemento IA: refinamento quando score baixo ou sem match
-    if (melhor_p is None or melhor_s < 0.80) and _ai_client is not None:
+    # Complemento IA: só quando não há match nenhum (evita 100+ chamadas API por pedido)
+    if melhor_p is None and _ai_client is not None:
         candidatos_emb = encontrar_produtos_ia(trecho, produtos, emb_prod)[:10]
         ai = _ai_refine_match(trecho, candidatos_emb)
-        if ai and (melhor_p is None or ai[1] > melhor_s):
+        if ai:
             melhor_p, melhor_s, melhor_emb, melhor_lev = ai
 
     return (melhor_p, melhor_s, melhor_emb, melhor_lev) if melhor_p else None

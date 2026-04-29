@@ -37,18 +37,24 @@ def _build_aliases_txt(aliases: dict, sku_map: dict) -> str:
     return f"\nNomes alternativos conhecidos:\n{lines}\n"
 
 
-def _match_produto(nome_ai: str, produtos: list) -> str | None:
+def _match_produto(nome_ai: str, produtos: list) -> tuple[str, float] | None:
     for p in produtos:
         if p.lower() == nome_ai.lower():
-            return p
-    result = process.extractOne(nome_ai, produtos, scorer=fuzz.token_sort_ratio)
+            return p, 1.0
+    result = process.extractOne(nome_ai, produtos, scorer=fuzz.token_set_ratio)
     if result and result[1] >= 70:
-        return result[0]
+        return result[0], result[1] / 100.0
     return None
 
 
 def _parse_json(texto: str) -> list:
-    match = re.search(r"\[.*?\]", texto, re.DOTALL)
+    # Tenta diretamente primeiro
+    try:
+        return json.loads(texto.strip())
+    except json.JSONDecodeError:
+        pass
+    # Fallback: extrai o array do meio do texto (guloso para apanhar arrays grandes)
+    match = re.search(r"\[.*\]", texto, re.DOTALL)
     if not match:
         return []
     try:
@@ -57,8 +63,14 @@ def _parse_json(texto: str) -> list:
         return []
 
 
+def _candidatos_por_linha(linha: str, produtos: list, limit: int = 20) -> list:
+    """Seleciona os melhores candidatos para uma linha de texto."""
+    top = process.extract(linha, produtos, scorer=fuzz.token_set_ratio, limit=limit)
+    return [r[0] for r in top] if top else []
+
+
 def _extrair_texto_imagem(image_path: Path, client) -> str:
-    """Passo 1: Claude lê a imagem e transcreve o texto (OCR puro)."""
+    """OCR puro: Claude transcreve o texto visível na imagem."""
     ext  = image_path.suffix.lower().lstrip(".")
     mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png"}.get(ext, "image/jpeg")
     with open(image_path, "rb") as f:
@@ -76,11 +88,9 @@ def _extrair_texto_imagem(image_path: Path, client) -> str:
                 {
                     "type": "text",
                     "text": (
-                        "Esta imagem é uma mensagem WhatsApp com uma encomenda de produtos.\n"
-                        "Transcreve APENAS o texto visível na imagem, linha por linha.\n"
+                        "Transcreve APENAS o texto visível nesta imagem, linha por linha.\n"
                         "Não interpretes nem traduz — copia exatamente o que está escrito.\n"
-                        "por cada produto que encontrares vai diretamente ao site inocos.com.\n"
-                        "procuras o produto e tiras as referência."
+                        "Inclui números e quantidades tal como aparecem."
                     )
                 }
             ]}]
@@ -92,7 +102,6 @@ def _extrair_texto_imagem(image_path: Path, client) -> str:
 
 
 def processar_imagem(image_path: Path, produtos: list, sku_map: dict, aliases: dict, client) -> list:
-    """Passo 1: OCR com Claude. Passo 2: matching igual ao texto."""
     texto = _extrair_texto_imagem(image_path, client)
     if not texto:
         return []
@@ -101,19 +110,39 @@ def processar_imagem(image_path: Path, produtos: list, sku_map: dict, aliases: d
 
 
 def processar_texto(texto: str, produtos: list, sku_map: dict, aliases: dict, client) -> list:
-    """Pré-filtra com rapidfuzz → envia os 40 melhores candidatos ao Claude."""
-    top = process.extract(texto, produtos, scorer=fuzz.token_set_ratio, limit=40)
-    candidatos = [r[0] for r in top] if top else produtos[:40]
+    """
+    Para cada linha, seleciona candidatos com rapidfuzz.
+    Envia texto + candidatos ao Claude para matching final.
+    """
+    linhas = [l.strip() for l in texto.splitlines() if l.strip()]
+    if not linhas:
+        return []
 
-    catalogo = _build_catalogo(candidatos, sku_map)
-    alias_txt = _build_aliases_txt(aliases, sku_map)
+    # Candidatos por linha (linha a linha evita diluição de score)
+    candidatos_set: set[str] = set()
+    for linha in linhas:
+        candidatos_set.update(_candidatos_por_linha(linha, produtos, limit=20))
+
+    # Aliases diretos têm sempre prioridade — garante que entram no catálogo
+    if aliases:
+        texto_lower = texto.lower()
+        for alias, produto in aliases.items():
+            if alias.lower() in texto_lower and produto in produtos:
+                candidatos_set.add(produto)
+
+    candidatos = list(candidatos_set)[:60]
+    catalogo   = _build_catalogo(candidatos, sku_map)
+    alias_txt  = _build_aliases_txt(aliases, sku_map)
 
     prompt = (
-        f"Catálogo de produtos de vernizes/unhas (nome + referência):\n{catalogo}\n"
+        f"Catálogo de produtos de vernizes/unhas:\n{catalogo}\n"
         f"{alias_txt}\n"
         f"Mensagem de encomenda:\n{texto}\n\n"
-        "Identifica os produtos e quantidades. Usa o nome EXATO do catálogo.\n"
-        'Responde APENAS com JSON válido: [{"produto": "nome exato do catálogo", "referencia": "REF", "quantidade": número}]\n'
+        "Identifica TODOS os produtos mencionados e as suas quantidades.\n"
+        "Usa o nome EXATO do catálogo acima — não inventes nomes.\n"
+        "Se um produto não estiver no catálogo, ignora-o.\n"
+        'Responde APENAS com JSON válido (sem texto antes ou depois):\n'
+        '[{"produto": "nome exato do catálogo", "quantidade": número}, ...]\n'
         "Se não houver produtos, responde []."
     )
 
@@ -123,13 +152,17 @@ def processar_texto(texto: str, produtos: list, sku_map: dict, aliases: dict, cl
             max_tokens=1024,
             messages=[{"role": "user", "content": prompt}]
         )
-        items = _parse_json(r.content[0].text)
+        raw = r.content[0].text
+        print(f"[AI texto] resposta: {raw[:300]}")
+        items = _parse_json(raw)
     except Exception as e:
         print(f"[AI texto] erro: {e}")
         return []
 
-    return [
-        (produto_real, 1.0, int(item.get("quantidade", 1)))
-        for item in items
-        if (produto_real := _match_produto(item.get("produto", ""), produtos))
-    ]
+    resultados = []
+    for item in items:
+        match = _match_produto(item.get("produto", ""), produtos)
+        if match:
+            produto_real, score = match
+            resultados.append((produto_real, score, int(item.get("quantidade", 1))))
+    return resultados
