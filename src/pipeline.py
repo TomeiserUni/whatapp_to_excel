@@ -13,20 +13,17 @@ from utils import load_pickle, cosine_similarity, normalizar_unidades, remover_a
 from parser import quantidade_para_produto
 
 # =========================
-# NVIDIA AI (opcional)
+# Claude AI (opcional)
 # =========================
 _ai_client = None
 
 def init_ai_client(api_key: str):
     global _ai_client
-    from openai import OpenAI
-    _ai_client = OpenAI(
-        base_url="https://integrate.api.nvidia.com/v1",
-        api_key=api_key,
-    )
+    import anthropic
+    _ai_client = anthropic.Anthropic(api_key=api_key)
 
 def _ai_refine_match(trecho: str, candidatos_emb: list) -> tuple | None:
-    """Pede à IA NVIDIA para confirmar o melhor produto entre os candidatos do embedding."""
+    """Pede ao Claude para confirmar o melhor produto entre os candidatos do embedding."""
     if _ai_client is None or not candidatos_emb:
         return None
     nomes = [p for p, _ in candidatos_emb[:10]]
@@ -37,13 +34,12 @@ def _ai_refine_match(trecho: str, candidatos_emb: list) -> tuple | None:
         f"Responde APENAS com o nome exato da lista, ou \"nenhum\"."
     )
     try:
-        r = _ai_client.chat.completions.create(
-            model="meta/llama-3.1-8b-instruct",
-            messages=[{"role": "user", "content": prompt}],
+        r = _ai_client.messages.create(
+            model="claude-haiku-4-5-20251001",
             max_tokens=80,
-            temperature=0,
+            messages=[{"role": "user", "content": prompt}],
         )
-        resposta = r.choices[0].message.content.strip()
+        resposta = r.content[0].text.strip()
         for nome in nomes:
             if nome.lower() in resposta.lower() or fuzz.ratio(resposta.lower(), nome.lower()) > 80:
                 return (nome, 0.82, 0.0, 0.82)
