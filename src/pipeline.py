@@ -630,6 +630,38 @@ UNIDADES        = {"ml", "gr", "grs", "g", "kg", "cm", "mm", "l", "lt", "lts",
 KEYWORDS_BOOST  = ["primer", "bailarina", "transparente"]
 PALAVRAS_GENERICAS = {"gel", "tips", "builder"}
 
+# Sinónimos aplicados antes do matching (informal → nome no catálogo)
+SINONIMOS = {
+    "direita": "reta",
+    "diretas": "retas",
+    "direto":  "reto",
+}
+
+_DE_CADA = re.compile(
+    r'^(?:(\d+)\s+)?(.+?)\s+(?:\d+\s+)?(?:pack\s+)?de\s+cada$',
+    re.IGNORECASE
+)
+
+def _aplicar_sinonimos(texto: str) -> str:
+    for original, substituto in SINONIMOS.items():
+        texto = re.sub(rf'\b{original}\b', substituto, texto)
+    return texto
+
+def _expandir_de_cada(linha: str, produtos: list, freq_palavras: dict, qty_override: int = 1) -> list[tuple[str, float, int]] | None:
+    """Se a linha tiver padrão 'X de cada', devolve todos os produtos que correspondem a X."""
+    m = _DE_CADA.match(linha.strip())
+    if not m:
+        return None
+    qty = int(m.group(1)) if m.group(1) else qty_override
+    trecho = _aplicar_sinonimos(m.group(2).strip())
+    resultados = []
+    for p in produtos:
+        score = fuzz.token_set_ratio(trecho, p.lower()) / 100
+        if score >= 0.75:
+            resultados.append((p, score, qty))
+    resultados.sort(key=lambda x: -x[1])
+    return resultados if resultados else None
+
 
 # =========================
 # FUSÃO DE LINHAS CURTAS
@@ -735,6 +767,7 @@ def processar_texto(texto: str, produtos: list, emb_prod,
         linha = remover_acentos(linha)
         linha = re.sub(r"[^\w\s]", "", linha).strip()
         linha = normalizar_unidades(linha)
+        linha = _aplicar_sinonimos(linha)
         if linha:
             linhas.append(linha)
 
@@ -746,6 +779,15 @@ def processar_texto(texto: str, produtos: list, emb_prod,
     melhor: dict[str, tuple[float, str]] = {}
     ordem:  dict[str, int] = {}
     for i, linha in enumerate(linhas):
+        # Padrão "X de cada" → expande para todas as variantes
+        de_cada = _expandir_de_cada(linha, produtos, freq_palavras)
+        if de_cada:
+            for produto, score, qty in de_cada:
+                if produto not in melhor or score > melhor[produto][0]:
+                    melhor[produto] = (score, linha)
+                if produto not in ordem:
+                    ordem[produto] = i
+            continue
         for produto, score, trecho, *_ in processar_linha(linha, produtos, emb_prod, freq_palavras, aliases=aliases, palavras_unicas=palavras_unicas):
             if produto not in melhor or score > melhor[produto][0]:
                 melhor[produto] = (score, trecho)

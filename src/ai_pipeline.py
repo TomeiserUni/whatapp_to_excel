@@ -68,9 +68,17 @@ def _parse_json(texto: str) -> list:
         return []
 
 
+_SINONIMOS = {"direita": "reta", "diretas": "retas", "direto": "reto"}
+
+def _normalizar_linha(linha: str) -> str:
+    for orig, sub in _SINONIMOS.items():
+        linha = re.sub(rf'\b{orig}\b', sub, linha, flags=re.IGNORECASE)
+    return linha
+
 def _candidatos_por_linha(linha: str, produtos: list, limit: int = 20) -> list:
     """Seleciona os melhores candidatos para uma linha de texto."""
-    top = process.extract(linha, produtos, scorer=fuzz.token_set_ratio, limit=limit)
+    linha_norm = _normalizar_linha(linha)
+    top = process.extract(linha_norm, produtos, scorer=fuzz.token_set_ratio, limit=limit)
     return [r[0] for r in top] if top else []
 
 
@@ -144,6 +152,12 @@ def processar_texto(texto: str, produtos: list, sku_map: dict, aliases: dict, cl
     candidatos_set: set[str] = set()
     for linha in linhas:
         candidatos_set.update(_candidatos_por_linha(linha, produtos, limit=20))
+        # Se "de cada", garante que TODAS as variantes do padrão entram no catálogo
+        linha_norm = _normalizar_linha(linha.lower())
+        if "de cada" in linha_norm:
+            prefixo = re.sub(r'\b\d+\b', '', linha_norm.split("de cada")[0]).strip()
+            top_todos = process.extract(prefixo, produtos, scorer=fuzz.token_set_ratio, limit=10)
+            candidatos_set.update(r[0] for r in top_todos if r[1] >= 70)
 
     # Aliases diretos têm sempre prioridade — garante que entram no catálogo
     if aliases:
@@ -165,6 +179,9 @@ def processar_texto(texto: str, produtos: list, sku_map: dict, aliases: dict, cl
         "Identifica TODOS os produtos mencionados e as suas quantidades.\n"
         "Usa o nome EXATO do catálogo acima — não inventes nomes.\n"
         "Se um produto não estiver no catálogo, ignora-o.\n"
+        "IMPORTANTE: Se a mensagem disser 'X de cada' (ex: 'limas retas 1 de cada'), "
+        "lista TODOS os produtos do catálogo que correspondam a X, cada um com a quantidade indicada.\n"
+        "IMPORTANTE: 'direita'/'diretas' = 'reta'/'retas' no contexto de limas.\n"
         'Responde APENAS com JSON válido (sem texto antes ou depois):\n'
         '[{"produto": "nome exato do catálogo", "quantidade": número}, ...]\n'
         "Se não houver produtos, responde []."
