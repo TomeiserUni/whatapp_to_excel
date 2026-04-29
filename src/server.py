@@ -89,9 +89,10 @@ def _load_pipeline():
         if api_key:
             pl.init_ai_client(api_key)
             print("[AI] Claude inicializado como complemento.")
-        produtos, emb_prod, sku_map = pl.load_produtos()
-        _pipeline = {"pl": pl, "produtos": produtos,
-                     "emb_prod": emb_prod, "sku_map": sku_map, "aliases": {}, "ai_client": None}
+        produtos, emb_prod, sku_map, freq_palavras, palavras_unicas = pl.load_produtos()
+        _pipeline = {"pl": pl, "produtos": produtos, "emb_prod": emb_prod,
+                     "sku_map": sku_map, "aliases": {}, "ai_client": None,
+                     "freq_palavras": freq_palavras, "palavras_unicas": palavras_unicas}
 
     print("[pipeline] Pronto.")
 
@@ -161,7 +162,8 @@ def processar():
             if IS_CLOUD:
                 rows = pl["pl"].processar_imagem(tmp_path, pl["produtos"], pl["sku_map"], pl["aliases"], pl["ai_client"], pl.get("exemplos", []))
             else:
-                rows = pl["pl"].processar_imagem(tmp_path, pl["produtos"], pl["emb_prod"])
+                rows = pl["pl"].processar_imagem(tmp_path, pl["produtos"], pl["emb_prod"],
+                                                  pl.get("freq_palavras"), pl.get("palavras_unicas"))
             if rows:
                 for produto, score, qty in rows:
                     resultados.append({
@@ -196,7 +198,8 @@ def processar_texto():
         if IS_CLOUD:
             rows = pl["pl"].processar_texto(linha, pl["produtos"], pl["sku_map"], pl["aliases"], pl["ai_client"], pl.get("exemplos", []))
         else:
-            rows = pl["pl"].processar_texto(linha, pl["produtos"], pl["emb_prod"])
+            rows = pl["pl"].processar_texto(linha, pl["produtos"], pl["emb_prod"],
+                                             pl.get("freq_palavras"), pl.get("palavras_unicas"))
         if rows:
             for p, s, q in rows:
                 resultados.append({

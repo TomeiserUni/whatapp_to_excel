@@ -111,7 +111,10 @@ def load_produtos():
     embeddings = np.load(DATA_DIR / "emb_prod.npy")
     sku_map_path = DATA_DIR / "sku_map.pkl"
     sku_map = load_pickle(sku_map_path) if sku_map_path.exists() else {}
-    return produtos, embeddings, sku_map
+    # Pré-computar uma vez — evita recalcular a cada linha no server
+    _cache_freq_palavras = calcular_freq_palavras(produtos, STOPWORDS)
+    _cache_palavras_unicas = calcular_palavras_unicas(produtos)
+    return produtos, embeddings, sku_map, _cache_freq_palavras, _cache_palavras_unicas
 
 def load_aliases() -> dict[str, str]:
     """
@@ -379,9 +382,14 @@ def _match_trecho_best(
         return None
 
     candidatos = {}
-    for p, s in encontrar_produtos_ia(trecho, produtos, emb_prod)[:3]:
-        candidatos[p] = {"emb": s, "lev": 0}
-    for p, s in encontrar_produtos_levenshtein(trecho, produtos, freq_palavras)[:3]:
+    # Fuzzy primeiro (rápido) — se score muito alto, salta o sentence transformer
+    lev_top = encontrar_produtos_levenshtein(trecho, produtos, freq_palavras)[:3]
+    best_lev = lev_top[0][1] if lev_top else 0
+    usar_emb = 0.60 <= best_lev <= 0.96  # só usa embedding na zona de incerteza
+    if usar_emb:
+        for p, s in encontrar_produtos_ia(trecho, produtos, emb_prod)[:3]:
+            candidatos[p] = {"emb": s, "lev": 0}
+    for p, s in lev_top:
         if p not in candidatos:
             candidatos[p] = {"emb": 0, "lev": s}
         else:
@@ -658,15 +666,16 @@ def _fundir_linhas_curtas(linhas: list[str], produtos, emb_prod, freq_palavras, 
 # =========================
 # PROCESSAR IMAGEM (silent — sem prints, para usar no app)
 # =========================
-def processar_imagem(img_path: Path, produtos: list, emb_prod) -> list[tuple[str, float, int]]:
+def processar_imagem(img_path: Path, produtos: list, emb_prod,
+                     freq_palavras=None, palavras_unicas=None) -> list[tuple[str, float, int]]:
     """
     Processa uma imagem e devolve [(produto, score, quantidade), ...].
     Usa greedy expansion com word consumption por linha (ver processar_linha).
     Sem output no terminal — para uso no app.
     """
     aliases        = load_aliases()
-    freq_palavras  = calcular_freq_palavras(produtos, STOPWORDS)
-    palavras_unicas = calcular_palavras_unicas(produtos)
+    freq_palavras  = freq_palavras  or calcular_freq_palavras(produtos, STOPWORDS)
+    palavras_unicas = palavras_unicas or calcular_palavras_unicas(produtos)
     linhas = (_claude_extrair_linhas(img_path) if _ai_client else None) or extrair_linhas(img_path)
     linhas         = _fundir_linhas_curtas(linhas, produtos, emb_prod, freq_palavras, aliases=aliases, palavras_unicas=palavras_unicas)
 
@@ -714,7 +723,8 @@ def processar_imagem(img_path: Path, produtos: list, emb_prod) -> list[tuple[str
 # =========================
 # PROCESSAR TEXTO (sem OCR — texto colado directamente)
 # =========================
-def processar_texto(texto: str, produtos: list, emb_prod) -> list[tuple[str, float, int]]:
+def processar_texto(texto: str, produtos: list, emb_prod,
+                    freq_palavras=None, palavras_unicas=None) -> list[tuple[str, float, int]]:
     """
     Processa texto colado (sem OCR) e devolve [(produto, score, quantidade), ...].
     """
@@ -729,8 +739,8 @@ def processar_texto(texto: str, produtos: list, emb_prod) -> list[tuple[str, flo
             linhas.append(linha)
 
     aliases         = load_aliases()
-    freq_palavras   = calcular_freq_palavras(produtos, STOPWORDS)
-    palavras_unicas = calcular_palavras_unicas(produtos)
+    freq_palavras   = freq_palavras   or calcular_freq_palavras(produtos, STOPWORDS)
+    palavras_unicas = palavras_unicas or calcular_palavras_unicas(produtos)
     linhas          = _fundir_linhas_curtas(linhas, produtos, emb_prod, freq_palavras, aliases=aliases, palavras_unicas=palavras_unicas)
 
     melhor: dict[str, tuple[float, str]] = {}

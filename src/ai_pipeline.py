@@ -109,8 +109,18 @@ def _extrair_texto_imagem(image_path: Path, client) -> str:
 def _build_exemplos_txt(exemplos: list) -> str:
     if not exemplos:
         return ""
-    lines = "\n".join(f'  "{e["escrito"]}" → {e["produto"]}' for e in exemplos)
-    return f"\nExemplos de como as clientes escrevem os produtos:\n{lines}\n"
+    lines = []
+    for e in exemplos:
+        escrito = e.get("escrito", "")
+        if "produtos" in e:
+            destino = ", ".join(e["produtos"])
+        else:
+            destino = e.get("produto", "")
+        if escrito and destino:
+            lines.append(f'  "{escrito}" → {destino}')
+    if not lines:
+        return ""
+    return f"\nExemplos de como as clientes escrevem os produtos:\n" + "\n".join(lines) + "\n"
 
 
 def processar_imagem(image_path: Path, produtos: list, sku_map: dict, aliases: dict, client, exemplos: list = None) -> list:
