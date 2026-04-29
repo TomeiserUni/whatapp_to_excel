@@ -276,26 +276,47 @@ def processar_texto():
     pl = _pipeline
     linhas = [l for l in _preprocessar_texto(texto) if l.strip()]
     resultados = []
-    for linha in linhas:
-        if IS_CLOUD:
-            rows = pl["pl"].processar_texto(linha, pl["produtos"], pl["sku_map"], pl["aliases"], pl["ai_client"], pl.get("exemplos", []))
-        else:
-            rows = pl["pl"].processar_texto(linha, pl["produtos"], pl["emb_prod"],
-                                             pl.get("freq_palavras"), pl.get("palavras_unicas"))
+
+    if IS_CLOUD:
+        # Uma única chamada à API para todo o texto (evita N×overhead)
+        texto_proc = "\n".join(linhas)
+        rows = pl["pl"].processar_texto(texto_proc, pl["produtos"], pl["sku_map"],
+                                         pl["aliases"], pl["ai_client"], pl.get("exemplos", []))
         if rows:
+            from rapidfuzz import fuzz as _rfuzz
             for row in rows:
                 p, s, q = row[0], row[1], row[2]
-                trecho = row[3] if len(row) > 3 else linha
+                # Atribui a linha original mais próxima por similaridade
+                origem = max(linhas, key=lambda l: _rfuzz.partial_ratio(p.lower(), l.lower()), default="") if linhas else ""
                 resultados.append({
                     "ficheiro":     "texto colado",
                     "produto":      p,
                     "qtd":          q,
                     "score":        round(s, 3),
                     "ref":          pl["sku_map"].get(p, ""),
-                    "texto_origem": trecho or linha,
+                    "texto_origem": origem,
                 })
         else:
-            resultados.append({"ficheiro": "texto colado", "produto": "", "qtd": "", "score": 0, "ref": "", "texto_origem": linha})
+            resultados.append({"ficheiro": "texto colado", "produto": "", "qtd": "", "score": 0, "ref": "", "texto_origem": ""})
+    else:
+        for linha in linhas:
+            rows = pl["pl"].processar_texto(linha, pl["produtos"], pl["emb_prod"],
+                                             pl.get("freq_palavras"), pl.get("palavras_unicas"))
+            if rows:
+                for row in rows:
+                    p, s, q = row[0], row[1], row[2]
+                    trecho = row[3] if len(row) > 3 else linha
+                    resultados.append({
+                        "ficheiro":     "texto colado",
+                        "produto":      p,
+                        "qtd":          q,
+                        "score":        round(s, 3),
+                        "ref":          pl["sku_map"].get(p, ""),
+                        "texto_origem": trecho or linha,
+                    })
+            else:
+                resultados.append({"ficheiro": "texto colado", "produto": "", "qtd": "", "score": 0, "ref": "", "texto_origem": linha})
+
     return jsonify(resultados)
 
 

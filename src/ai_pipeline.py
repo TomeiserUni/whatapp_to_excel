@@ -176,7 +176,8 @@ def processar_texto(texto: str, produtos: list, sku_map: dict, aliases: dict, cl
             if alias.lower() in texto_lower and produto in produtos:
                 candidatos_set.add(produto)
 
-    candidatos = list(candidatos_set)[:60]
+    cap = max(60, min(len(linhas) * 8, 200))
+    candidatos = list(candidatos_set)[:cap]
     catalogo    = _build_catalogo(candidatos, sku_map)
     base_rag    = _construir_base_rag(exemplos or [], aliases)
     exemplos_txt = _recuperar_exemplos(texto, base_rag)
@@ -199,7 +200,7 @@ def processar_texto(texto: str, produtos: list, sku_map: dict, aliases: dict, cl
     try:
         r = client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=1024,
+            max_tokens=max(1024, len(linhas) * 60),
             messages=[{"role": "user", "content": prompt}]
         )
         raw = r.content[0].text
