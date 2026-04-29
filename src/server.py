@@ -278,16 +278,43 @@ def processar_texto():
     resultados = []
 
     if IS_CLOUD:
-        # Uma única chamada à API para todo o texto (evita N×overhead)
-        texto_proc = "\n".join(linhas)
-        rows = pl["pl"].processar_texto(texto_proc, pl["produtos"], pl["sku_map"],
-                                         pl["aliases"], pl["ai_client"], pl.get("exemplos", []))
-        if rows:
-            from rapidfuzz import fuzz as _rfuzz
-            for row in rows:
-                p, s, q = row[0], row[1], row[2]
-                # Atribui a linha original mais próxima por similaridade
-                origem = max(linhas, key=lambda l: _rfuzz.partial_ratio(p.lower(), l.lower()), default="") if linhas else ""
+        # Batches paralelos: divide em grupos de 15 e chama a API em simultâneo
+        from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
+        from rapidfuzz import fuzz as _rfuzz
+
+        _BATCH = 15
+        batches = [linhas[i:i + _BATCH] for i in range(0, len(linhas), _BATCH)]
+
+        raw_rows: list[tuple] = []  # (row, batch)
+        with ThreadPoolExecutor(max_workers=min(len(batches), 6)) as pool:
+            futs = {
+                pool.submit(
+                    pl["pl"].processar_texto,
+                    "\n".join(b),
+                    pl["produtos"], pl["sku_map"], pl["aliases"],
+                    pl["ai_client"], pl.get("exemplos", [])
+                ): b
+                for b in batches
+            }
+            for fut in _as_completed(futs):
+                b = futs[fut]
+                try:
+                    for row in (fut.result() or []):
+                        raw_rows.append((row, b))
+                except Exception as e:
+                    print(f"[batch] erro: {e}")
+
+        # Deduplicar por produto (mantém score mais alto)
+        melhor: dict[str, tuple] = {}
+        for row, b in raw_rows:
+            p = row[0]
+            if p not in melhor or row[1] > melhor[p][0][1]:
+                melhor[p] = (row, b)
+
+        if melhor:
+            for p, (row, b) in melhor.items():
+                _, s, q = row[0], row[1], row[2]
+                origem = max(b, key=lambda l: _rfuzz.partial_ratio(p.lower(), l.lower()), default="")
                 resultados.append({
                     "ficheiro":     "texto colado",
                     "produto":      p,
