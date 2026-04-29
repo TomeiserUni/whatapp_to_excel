@@ -58,34 +58,39 @@ def _parse_json(texto: str) -> list:
 
 
 def _extrair_texto_imagem(image_path: Path, client) -> str:
-    """Passo 1: usa o modelo de visão apenas para OCR (sem catálogo)."""
+    """Passo 1: Claude lê a imagem e transcreve o texto (OCR puro)."""
     ext  = image_path.suffix.lower().lstrip(".")
     mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png"}.get(ext, "image/jpeg")
     with open(image_path, "rb") as f:
         img_b64 = base64.b64encode(f.read()).decode()
 
     try:
-        r = client.chat.completions.create(
-            model="meta/llama-3.2-11b-vision-instruct",
-            messages=[{"role": "user", "content": [
-                {"type": "text", "text": (
-                    "Esta imagem é uma mensagem WhatsApp com uma encomenda de produtos.\n"
-                    "Transcreve APENAS o texto visível na imagem, linha por linha.\n"
-                    "Não interpretes nem traduz — copia exatamente o que está escrito."
-                )},
-                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{img_b64}"}}
-            ]}],
+        r = client.messages.create(
+            model="claude-haiku-4-5-20251001",
             max_tokens=512,
-            temperature=0,
+            messages=[{"role": "user", "content": [
+                {
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": mime, "data": img_b64}
+                },
+                {
+                    "type": "text",
+                    "text": (
+                        "Esta imagem é uma mensagem WhatsApp com uma encomenda de produtos.\n"
+                        "Transcreve APENAS o texto visível na imagem, linha por linha.\n"
+                        "Não interpretes nem traduz — copia exatamente o que está escrito."
+                    )
+                }
+            ]}]
         )
-        return r.choices[0].message.content.strip()
+        return r.content[0].text.strip()
     except Exception as e:
         print(f"[AI OCR] erro: {e}")
         return ""
 
 
 def processar_imagem(image_path: Path, produtos: list, sku_map: dict, aliases: dict, client) -> list:
-    """Passo 1: OCR com visão. Passo 2: matching igual ao texto."""
+    """Passo 1: OCR com Claude. Passo 2: matching igual ao texto."""
     texto = _extrair_texto_imagem(image_path, client)
     if not texto:
         return []
@@ -94,7 +99,7 @@ def processar_imagem(image_path: Path, produtos: list, sku_map: dict, aliases: d
 
 
 def processar_texto(texto: str, produtos: list, sku_map: dict, aliases: dict, client) -> list:
-    """Pré-filtra com rapidfuzz → envia só os 40 melhores candidatos para a AI."""
+    """Pré-filtra com rapidfuzz → envia os 40 melhores candidatos ao Claude."""
     top = process.extract(texto, produtos, scorer=fuzz.token_set_ratio, limit=40)
     candidatos = [r[0] for r in top] if top else produtos[:40]
 
@@ -111,13 +116,12 @@ def processar_texto(texto: str, produtos: list, sku_map: dict, aliases: dict, cl
     )
 
     try:
-        r = client.chat.completions.create(
-            model="meta/llama-3.1-8b-instruct",
-            messages=[{"role": "user", "content": prompt}],
+        r = client.messages.create(
+            model="claude-haiku-4-5-20251001",
             max_tokens=1024,
-            temperature=0,
+            messages=[{"role": "user", "content": prompt}]
         )
-        items = _parse_json(r.choices[0].message.content)
+        items = _parse_json(r.content[0].text)
     except Exception as e:
         print(f"[AI texto] erro: {e}")
         return []

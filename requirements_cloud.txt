@@ -1,6 +1,6 @@
 flask
 waitress
-openai
+anthropic
 openpyxl
 rapidfuzz
 Pillow

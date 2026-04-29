@@ -40,13 +40,12 @@ def _load_pipeline():
     from dotenv import load_dotenv
     load_dotenv()
 
-    api_key = os.environ.get("NVIDIA_API_KEY")
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
 
     if IS_CLOUD:
-        # Cloud: pipeline leve via NVIDIA API (sem torch/easyocr)
-        from openai import OpenAI
+        import anthropic
         import ai_pipeline as pl
-        client = OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=api_key)
+        client = anthropic.Anthropic(api_key=api_key)
         produtos, sku_map, aliases = pl.load_produtos(_BUNDLE / "data")
         _pipeline = {"pl": pl, "produtos": produtos, "emb_prod": None,
                      "sku_map": sku_map, "aliases": aliases, "ai_client": client}
@@ -55,7 +54,7 @@ def _load_pipeline():
         import pipeline as pl
         if api_key:
             pl.init_ai_client(api_key)
-            print("[AI] Cliente NVIDIA inicializado.")
+            print("[AI] Cliente Anthropic inicializado.")
         produtos, emb_prod, sku_map = pl.load_produtos()
         _pipeline = {"pl": pl, "produtos": produtos,
                      "emb_prod": emb_prod, "sku_map": sku_map, "aliases": {}, "ai_client": None}
@@ -76,7 +75,7 @@ def status():
 
 @app.route("/config", methods=["GET"])
 def get_config():
-    key = os.environ.get("NVIDIA_API_KEY", "")
+    key = os.environ.get("ANTHROPIC_API_KEY", "")
     return jsonify({"configured": bool(key)})
 
 
@@ -88,8 +87,8 @@ def set_config():
         return jsonify({"error": "Chave vazia"}), 400
     env_path = _USER_DIR / ".env"
     from dotenv import set_key as dotenv_set_key
-    dotenv_set_key(str(env_path), "NVIDIA_API_KEY", key)
-    os.environ["NVIDIA_API_KEY"] = key
+    dotenv_set_key(str(env_path), "ANTHROPIC_API_KEY", key)
+    os.environ["ANTHROPIC_API_KEY"] = key
     if _pipeline is not None and not IS_CLOUD:
         _pipeline["pl"].init_ai_client(key)
     return jsonify({"ok": True})
