@@ -131,6 +131,40 @@ def load_aliases() -> dict[str, str]:
 # =========================
 # OCR
 # =========================
+def _claude_extrair_linhas(imagem_path):
+    """OCR via Claude — usa quando _ai_client está disponível."""
+    import base64
+    ext  = Path(imagem_path).suffix.lower().lstrip(".")
+    mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png"}.get(ext, "image/jpeg")
+    with open(imagem_path, "rb") as f:
+        img_b64 = base64.b64encode(f.read()).decode()
+    try:
+        r = _ai_client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=512,
+            messages=[{"role": "user", "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": mime, "data": img_b64}},
+                {"type": "text", "text": (
+                    "Transcreve APENAS o texto visível nesta imagem, linha por linha.\n"
+                    "Não interpretes — copia exatamente o que está escrito."
+                )}
+            ]}]
+        )
+        texto = r.content[0].text.strip()
+    except Exception as e:
+        print(f"[Claude OCR] erro: {e}")
+        return None  # fallback para EasyOCR
+    linhas = []
+    for linha in texto.splitlines():
+        linha = linha.lower().strip()
+        linha = remover_acentos(linha)
+        linha = re.sub(r"[^\w\s]", "", linha).strip()
+        linha = normalizar_unidades(linha)
+        if linha:
+            linhas.append(linha)
+    return linhas
+
+
 def extrair_linhas(imagem_path):
     result = reader.readtext(str(imagem_path))
     result.sort(key=lambda r: r[0][0][1])
@@ -633,7 +667,7 @@ def processar_imagem(img_path: Path, produtos: list, emb_prod) -> list[tuple[str
     aliases        = load_aliases()
     freq_palavras  = calcular_freq_palavras(produtos, STOPWORDS)
     palavras_unicas = calcular_palavras_unicas(produtos)
-    linhas         = extrair_linhas(img_path)
+    linhas = (_claude_extrair_linhas(img_path) if _ai_client else None) or extrair_linhas(img_path)
     linhas         = _fundir_linhas_curtas(linhas, produtos, emb_prod, freq_palavras, aliases=aliases, palavras_unicas=palavras_unicas)
 
     ocr_tokens, ocr_tokens_num = set(), set()
