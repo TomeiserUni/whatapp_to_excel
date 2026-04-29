@@ -493,7 +493,7 @@ def processar_linha(
     i = 0
 
     while i < n:
-        if consumed[i] or palavras[i] in STOPWORDS:
+        if consumed[i] or palavras[i] in STOPWORDS or palavras[i].isdigit():
             i += 1
             continue
 
@@ -752,7 +752,7 @@ def processar_imagem(img_path: Path, produtos: list, emb_prod,
     resultado = [(p, s, t) for p, s, t in resultado if p not in subsumed]
     resultado.sort(key=lambda x: ordem.get(x[0], 0))
 
-    return [(p, s, quantidade_para_produto(t, linhas, produto_nome=p))
+    return [(p, s, quantidade_para_produto(t, linhas, produto_nome=p), t)
             for p, s, t in resultado]
 
 
@@ -782,7 +782,11 @@ def processar_texto(texto: str, produtos: list, emb_prod,
 
     melhor: dict[str, tuple[float, str]] = {}
     ordem:  dict[str, int] = {}
+    _ignorar = {k for k, v in (aliases or {}).items() if v == ""}
     for i, linha in enumerate(linhas):
+        # Termos explicitamente ignorados (alias com valor "") → linha vazia
+        if any(term in linha for term in _ignorar):
+            continue
         # Padrão "X de cada" → expande para todas as variantes
         de_cada = _expandir_de_cada(linha, produtos)
         if de_cada:
@@ -807,7 +811,7 @@ def processar_texto(texto: str, produtos: list, emb_prod,
     resultado = [(p, s, t) for p, s, t in resultado if p not in subsumed]
     resultado.sort(key=lambda x: ordem.get(x[0], 0))
 
-    return [(p, s, quantidade_para_produto(t, linhas, produto_nome=p))
+    return [(p, s, quantidade_para_produto(t, linhas, produto_nome=p), t)
             for p, s, t in resultado]
 
 

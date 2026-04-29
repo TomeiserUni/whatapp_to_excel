@@ -160,21 +160,29 @@ def processar():
             tmp_path = Path(tmp.name)
         try:
             if IS_CLOUD:
-                rows = pl["pl"].processar_imagem(tmp_path, pl["produtos"], pl["sku_map"], pl["aliases"], pl["ai_client"], pl.get("exemplos", []))
+                rows, ocr_text = pl["pl"].processar_imagem(tmp_path, pl["produtos"], pl["sku_map"], pl["aliases"], pl["ai_client"], pl.get("exemplos", []))
+                texto_origem_img = ocr_text[:300] if ocr_text else ""
             else:
                 rows = pl["pl"].processar_imagem(tmp_path, pl["produtos"], pl["emb_prod"],
                                                   pl.get("freq_palavras"), pl.get("palavras_unicas"))
+                texto_origem_img = None  # cada row traz o seu trecho
             if rows:
-                for produto, score, qty in rows:
+                for row in rows:
+                    if IS_CLOUD:
+                        produto, score, qty = row
+                        trecho = texto_origem_img
+                    else:
+                        produto, score, qty, trecho = row
                     resultados.append({
-                        "ficheiro": f.filename,
-                        "produto":  produto,
-                        "qtd":      qty,
-                        "score":    round(score, 3),
-                        "ref":      pl["sku_map"].get(produto, ""),
+                        "ficheiro":      f.filename,
+                        "produto":       produto,
+                        "qtd":           qty,
+                        "score":         round(score, 3),
+                        "ref":           pl["sku_map"].get(produto, ""),
+                        "texto_origem":  trecho or "",
                     })
             else:
-                resultados.append({"ficheiro": f.filename, "produto": "", "qtd": "", "score": 0, "ref": ""})
+                resultados.append({"ficheiro": f.filename, "produto": "", "qtd": "", "score": 0, "ref": "", "texto_origem": ""})
         finally:
             tmp_path.unlink(missing_ok=True)
 
@@ -201,16 +209,19 @@ def processar_texto():
             rows = pl["pl"].processar_texto(linha, pl["produtos"], pl["emb_prod"],
                                              pl.get("freq_palavras"), pl.get("palavras_unicas"))
         if rows:
-            for p, s, q in rows:
+            for row in rows:
+                p, s, q = row[0], row[1], row[2]
+                trecho = row[3] if len(row) > 3 else linha
                 resultados.append({
-                    "ficheiro": "texto colado",
-                    "produto":  p,
-                    "qtd":      q,
-                    "score":    round(s, 3),
-                    "ref":      pl["sku_map"].get(p, ""),
+                    "ficheiro":     "texto colado",
+                    "produto":      p,
+                    "qtd":          q,
+                    "score":        round(s, 3),
+                    "ref":          pl["sku_map"].get(p, ""),
+                    "texto_origem": trecho or linha,
                 })
         else:
-            resultados.append({"ficheiro": "texto colado", "produto": "", "qtd": "", "score": 0, "ref": ""})
+            resultados.append({"ficheiro": "texto colado", "produto": "", "qtd": "", "score": 0, "ref": "", "texto_origem": linha})
     return jsonify(resultados)
 
 
@@ -218,18 +229,44 @@ def processar_texto():
 @login_required
 def exportar():
     import openpyxl
+    from openpyxl.styles import PatternFill, Font, Alignment
+
+    FILL_GREEN  = PatternFill("solid", fgColor="C6EFCE")
+    FILL_YELLOW = PatternFill("solid", fgColor="FFEB9C")
+    FILL_RED    = PatternFill("solid", fgColor="FFC7CE")
+
+    def _fill(score, produto):
+        if not produto:
+            return FILL_RED
+        if score >= 0.90:
+            return FILL_GREEN
+        if score >= 0.70:
+            return FILL_YELLOW
+        return FILL_RED
+
     data = request.json or []
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Resultados"
-    ws.append(["Referência", "Produto", "Quantidade"])
+    ws.append(["Referência", "Produto", "Quantidade", "Texto reconhecido"])
     for cell in ws[1]:
-        cell.font = openpyxl.styles.Font(bold=True)
+        cell.font = Font(bold=True)
     ws.column_dimensions["A"].width = 15
     ws.column_dimensions["B"].width = 55
     ws.column_dimensions["C"].width = 12
+    ws.column_dimensions["D"].width = 50
+
     for row in data:
-        ws.append([row["ref"], row["produto"], row["qtd"]])
+        produto = row.get("produto", "")
+        score   = float(row.get("score", 0))
+        texto   = row.get("texto_origem", "")
+        label   = produto if produto else "ERRO — produto não identificado"
+        ws.append([row.get("ref", ""), label, row.get("qtd", ""), texto])
+        fill = _fill(score, produto)
+        for cell in ws[ws.max_row]:
+            cell.fill = fill
+            cell.alignment = Alignment(wrap_text=False)
+
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)

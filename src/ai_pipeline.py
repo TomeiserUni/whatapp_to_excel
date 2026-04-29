@@ -135,12 +135,12 @@ def _recuperar_exemplos(texto: str, base_rag: list[dict], top_k: int = 12) -> st
     return "\nExemplos de correspondências anteriores (mais relevantes para este pedido):\n" + "\n".join(lines) + "\n"
 
 
-def processar_imagem(image_path: Path, produtos: list, sku_map: dict, aliases: dict, client, exemplos: list = None) -> list:
+def processar_imagem(image_path: Path, produtos: list, sku_map: dict, aliases: dict, client, exemplos: list = None) -> tuple[list, str]:
     texto = _extrair_texto_imagem(image_path, client)
     if not texto:
-        return []
+        return [], ""
     print(f"[AI OCR] texto extraído: {texto[:200]}")
-    return processar_texto(texto, produtos, sku_map, aliases, client, exemplos or [])
+    return processar_texto(texto, produtos, sku_map, aliases, client, exemplos or []), texto
 
 
 def processar_texto(texto: str, produtos: list, sku_map: dict, aliases: dict, client, exemplos: list = None) -> list:
@@ -149,6 +149,12 @@ def processar_texto(texto: str, produtos: list, sku_map: dict, aliases: dict, cl
     Envia texto + candidatos ao Claude para matching final.
     """
     linhas = [l.strip() for l in texto.splitlines() if l.strip()]
+    if not linhas:
+        return []
+
+    # Filtrar linhas com termos ignorados (alias com valor "")
+    _ignorar = {k for k, v in (aliases or {}).items() if v == ""}
+    linhas = [l for l in linhas if not any(t in l.lower() for t in _ignorar)]
     if not linhas:
         return []
 
