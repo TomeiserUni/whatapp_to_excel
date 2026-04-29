@@ -80,9 +80,9 @@ def _load_pipeline():
         import anthropic
         import ai_pipeline as pl
         client = anthropic.Anthropic(api_key=api_key)
-        produtos, sku_map, aliases = pl.load_produtos(_BUNDLE / "data")
+        produtos, sku_map, aliases, exemplos = pl.load_produtos(_BUNDLE / "data")
         _pipeline = {"pl": pl, "produtos": produtos, "emb_prod": None,
-                     "sku_map": sku_map, "aliases": aliases, "ai_client": client}
+                     "sku_map": sku_map, "aliases": aliases, "exemplos": exemplos, "ai_client": client}
     else:
         # Local: pipeline completo com embeddings + EasyOCR
         import pipeline as pl
@@ -159,7 +159,7 @@ def processar():
             tmp_path = Path(tmp.name)
         try:
             if IS_CLOUD:
-                rows = pl["pl"].processar_imagem(tmp_path, pl["produtos"], pl["sku_map"], pl["aliases"], pl["ai_client"])
+                rows = pl["pl"].processar_imagem(tmp_path, pl["produtos"], pl["sku_map"], pl["aliases"], pl["ai_client"], pl.get("exemplos", []))
             else:
                 rows = pl["pl"].processar_imagem(tmp_path, pl["produtos"], pl["emb_prod"])
             if rows:
@@ -194,7 +194,7 @@ def processar_texto():
     resultados = []
     for linha in linhas:
         if IS_CLOUD:
-            rows = pl["pl"].processar_texto(linha, pl["produtos"], pl["sku_map"], pl["aliases"], pl["ai_client"])
+            rows = pl["pl"].processar_texto(linha, pl["produtos"], pl["sku_map"], pl["aliases"], pl["ai_client"], pl.get("exemplos", []))
         else:
             rows = pl["pl"].processar_texto(linha, pl["produtos"], pl["emb_prod"])
         if rows:

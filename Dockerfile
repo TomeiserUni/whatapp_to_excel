@@ -6,9 +6,10 @@ COPY requirements_cloud.txt .
 RUN pip install --no-cache-dir -r requirements_cloud.txt
 
 COPY src/ ./src/
-COPY data/prod.pkl    ./data/
-COPY data/sku_map.pkl ./data/
-COPY data/aliases.json ./data/
+COPY data/prod.pkl      ./data/
+COPY data/sku_map.pkl   ./data/
+COPY data/aliases.json  ./data/
+COPY data/exemplos.json ./data/
 
 ENV PYTHONUNBUFFERED=1
 

@@ -20,7 +20,12 @@ def load_produtos(data_dir: Path):
             aliases = json.load(f)
     except FileNotFoundError:
         aliases = {}
-    return produtos, sku_map, aliases
+    try:
+        with open(data_dir / "exemplos.json") as f:
+            exemplos = json.load(f)
+    except FileNotFoundError:
+        exemplos = []
+    return produtos, sku_map, aliases, exemplos
 
 
 def _build_catalogo(candidatos: list, sku_map: dict) -> str:
@@ -101,15 +106,22 @@ def _extrair_texto_imagem(image_path: Path, client) -> str:
         return ""
 
 
-def processar_imagem(image_path: Path, produtos: list, sku_map: dict, aliases: dict, client) -> list:
+def _build_exemplos_txt(exemplos: list) -> str:
+    if not exemplos:
+        return ""
+    lines = "\n".join(f'  "{e["escrito"]}" → {e["produto"]}' for e in exemplos)
+    return f"\nExemplos de como as clientes escrevem os produtos:\n{lines}\n"
+
+
+def processar_imagem(image_path: Path, produtos: list, sku_map: dict, aliases: dict, client, exemplos: list = None) -> list:
     texto = _extrair_texto_imagem(image_path, client)
     if not texto:
         return []
     print(f"[AI OCR] texto extraído: {texto[:200]}")
-    return processar_texto(texto, produtos, sku_map, aliases, client)
+    return processar_texto(texto, produtos, sku_map, aliases, client, exemplos or [])
 
 
-def processar_texto(texto: str, produtos: list, sku_map: dict, aliases: dict, client) -> list:
+def processar_texto(texto: str, produtos: list, sku_map: dict, aliases: dict, client, exemplos: list = None) -> list:
     """
     Para cada linha, seleciona candidatos com rapidfuzz.
     Envia texto + candidatos ao Claude para matching final.
@@ -131,12 +143,14 @@ def processar_texto(texto: str, produtos: list, sku_map: dict, aliases: dict, cl
                 candidatos_set.add(produto)
 
     candidatos = list(candidatos_set)[:60]
-    catalogo   = _build_catalogo(candidatos, sku_map)
-    alias_txt  = _build_aliases_txt(aliases, sku_map)
+    catalogo      = _build_catalogo(candidatos, sku_map)
+    alias_txt     = _build_aliases_txt(aliases, sku_map)
+    exemplos_txt  = _build_exemplos_txt(exemplos or [])
 
     prompt = (
         f"Catálogo de produtos de vernizes/unhas:\n{catalogo}\n"
-        f"{alias_txt}\n"
+        f"{alias_txt}"
+        f"{exemplos_txt}\n"
         f"Mensagem de encomenda:\n{texto}\n\n"
         "Identifica TODOS os produtos mencionados e as suas quantidades.\n"
         "Usa o nome EXATO do catálogo acima — não inventes nomes.\n"
