@@ -157,16 +157,14 @@ def exportar():
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Resultados"
-    ws.append(["Imagem", "Referência", "Produto", "Quantidade", "Score"])
+    ws.append(["Referência", "Produto", "Quantidade"])
     for cell in ws[1]:
         cell.font = openpyxl.styles.Font(bold=True)
-    ws.column_dimensions["A"].width = 30
-    ws.column_dimensions["B"].width = 15
-    ws.column_dimensions["C"].width = 55
-    ws.column_dimensions["D"].width = 12
-    ws.column_dimensions["E"].width = 10
+    ws.column_dimensions["A"].width = 15
+    ws.column_dimensions["B"].width = 55
+    ws.column_dimensions["C"].width = 12
     for row in data:
-        ws.append([row["ficheiro"], row["ref"], row["produto"], row["qtd"], row["score"]])
+        ws.append([row["ref"], row["produto"], row["qtd"]])
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
