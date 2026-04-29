@@ -78,7 +78,9 @@ def _extrair_texto_imagem(image_path: Path, client) -> str:
                     "text": (
                         "Esta imagem é uma mensagem WhatsApp com uma encomenda de produtos.\n"
                         "Transcreve APENAS o texto visível na imagem, linha por linha.\n"
-                        "Não interpretes nem traduz — copia exatamente o que está escrito."
+                        "Não interpretes nem traduz — copia exatamente o que está escrito.\n"
+                        "por cada produto que encontrares vai diretamente ao site inocos.com.\n"
+                        "procuras o produto e tiras as referência."
                     )
                 }
             ]}]
