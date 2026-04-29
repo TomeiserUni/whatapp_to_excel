@@ -57,49 +57,44 @@ def _parse_json(texto: str) -> list:
         return []
 
 
-def processar_imagem(image_path: Path, produtos: list, sku_map: dict, aliases: dict, client) -> list:
+def _extrair_texto_imagem(image_path: Path, client) -> str:
+    """Passo 1: usa o modelo de visão apenas para OCR (sem catálogo)."""
     ext  = image_path.suffix.lower().lstrip(".")
     mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png"}.get(ext, "image/jpeg")
     with open(image_path, "rb") as f:
         img_b64 = base64.b64encode(f.read()).decode()
 
-    # Catálogo compacto (sem REF) para poupar tokens no modelo de visão
-    catalogo_compacto = "\n".join(f"- {p}" for p in produtos)
-    alias_txt = _build_aliases_txt(aliases, sku_map)
-
-    prompt = (
-        "Esta imagem é uma mensagem WhatsApp com uma encomenda de vernizes/produtos de unhas.\n\n"
-        f"Catálogo disponível:\n{catalogo_compacto}\n"
-        f"{alias_txt}\n"
-        "Identifica os produtos encomendados e as quantidades.\n"
-        'Responde APENAS com JSON válido: [{"produto": "nome exato do catálogo", "quantidade": número}]\n'
-        "Se não houver produtos reconhecíveis, responde []."
-    )
-
     try:
         r = client.chat.completions.create(
             model="meta/llama-3.2-11b-vision-instruct",
             messages=[{"role": "user", "content": [
-                {"type": "text", "text": prompt},
+                {"type": "text", "text": (
+                    "Esta imagem é uma mensagem WhatsApp com uma encomenda de produtos.\n"
+                    "Transcreve APENAS o texto visível na imagem, linha por linha.\n"
+                    "Não interpretes nem traduz — copia exatamente o que está escrito."
+                )},
                 {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{img_b64}"}}
             ]}],
-            max_tokens=1024,
+            max_tokens=512,
             temperature=0,
         )
-        items = _parse_json(r.choices[0].message.content)
+        return r.choices[0].message.content.strip()
     except Exception as e:
-        print(f"[AI imagem] erro: {e}")
-        return []
+        print(f"[AI OCR] erro: {e}")
+        return ""
 
-    return [
-        (produto_real, 1.0, int(item.get("quantidade", 1)))
-        for item in items
-        if (produto_real := _match_produto(item.get("produto", ""), produtos))
-    ]
+
+def processar_imagem(image_path: Path, produtos: list, sku_map: dict, aliases: dict, client) -> list:
+    """Passo 1: OCR com visão. Passo 2: matching igual ao texto."""
+    texto = _extrair_texto_imagem(image_path, client)
+    if not texto:
+        return []
+    print(f"[AI OCR] texto extraído: {texto[:200]}")
+    return processar_texto(texto, produtos, sku_map, aliases, client)
 
 
 def processar_texto(texto: str, produtos: list, sku_map: dict, aliases: dict, client) -> list:
-    # Pré-filtrar os 40 candidatos mais prováveis para reduzir tokens
+    """Pré-filtra com rapidfuzz → envia só os 40 melhores candidatos para a AI."""
     top = process.extract(texto, produtos, scorer=fuzz.token_set_ratio, limit=40)
     candidatos = [r[0] for r in top] if top else produtos[:40]
 
