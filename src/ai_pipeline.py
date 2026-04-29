@@ -30,7 +30,7 @@ def load_produtos(data_dir: Path):
             context = json.load(f)
     except FileNotFoundError:
         context = {}
-    return produtos, sku_map, aliases, exemplos, context
+    return produtos, sku_map, aliases, exemplos
 
 
 def _build_catalogo(candidatos: list, sku_map: dict) -> str:
@@ -70,6 +70,20 @@ def _normalizar_linha(linha: str) -> str:
     for orig, sub in _SINONIMOS.items():
         linha = re.sub(rf'\b{orig}\b', sub, linha, flags=re.IGNORECASE)
     return linha
+
+
+def _linha_so_contexto(linha: str) -> bool:
+    lower = linha.lower().strip()
+    lower_sem_qtd = re.sub(r"\b\d+\b", "", lower)
+    lower_sem_qtd = re.sub(r"\b(?:unidades?|un|pcs?|cada)\b", "", lower_sem_qtd).strip()
+    return (
+        lower in {"de cada", "verniz normal", "verniz gel"}
+        or lower.startswith(("bom dia", "boa tarde", "boa noite"))
+        or lower.startswith(("encomenda ", "pedido "))
+        or "cores novas" in lower
+        or lower_sem_qtd in {"cores novas", "verniz normal", "verniz gel"}
+    )
+
 
 def _candidatos_por_linha(linha: str, produtos: list, limit: int = 20) -> list:
     """Seleciona os melhores candidatos para uma linha de texto."""
@@ -159,53 +173,63 @@ def processar_texto(texto: str, produtos: list, sku_map: dict, aliases: dict, cl
 
     # Filtrar linhas com termos ignorados (alias com valor "")
     _ignorar = {k for k, v in (aliases or {}).items() if v == ""}
-    linhas = [l for l in linhas if not any(t in l.lower() for t in _ignorar)]
+    linhas = [l for l in linhas if not _linha_so_contexto(l) and not any(t in l.lower() for t in _ignorar)]
     if not linhas:
         return []
 
     # Candidatos por linha (linha a linha evita diluição de score)
-    candidatos_set: set[str] = set()
+    candidatos_score: dict[str, float] = {}
     for linha in linhas:
-        candidatos_set.update(_candidatos_por_linha(linha, produtos, limit=20))
+        linha_norm = _normalizar_linha(linha)
+        for produto, score, *_ in process.extract(linha_norm, produtos, scorer=fuzz.token_set_ratio, limit=20):
+            candidatos_score[produto] = max(candidatos_score.get(produto, 0), score)
         # Se "de cada", garante que TODAS as variantes do padrão entram no catálogo
         linha_norm = _normalizar_linha(linha.lower())
         if "de cada" in linha_norm:
             prefixo = re.sub(r'\b\d+\b', '', linha_norm.split("de cada")[0]).strip()
             top_todos = process.extract(prefixo, produtos, scorer=fuzz.token_set_ratio, limit=10)
-            candidatos_set.update(r[0] for r in top_todos if r[1] >= 70)
+            for produto, score, *_ in top_todos:
+                if score >= 70:
+                    candidatos_score[produto] = max(candidatos_score.get(produto, 0), score)
 
     # Aliases diretos têm sempre prioridade — garante que entram no catálogo
     if aliases:
         texto_lower = texto.lower()
         for alias, produto in aliases.items():
             if alias.lower() in texto_lower and produto in produtos:
-                candidatos_set.add(produto)
+                candidatos_score[produto] = max(candidatos_score.get(produto, 0), 100)
 
-    cap = max(40, min(len(linhas) * 6, 120))
-    candidatos = list(candidatos_set)[:cap]
+    cap = max(60, min(len(linhas) * 8, 180))
+    candidatos = [
+        produto for produto, _score in sorted(candidatos_score.items(), key=lambda item: item[1], reverse=True)
+    ][:cap]
     catalogo    = _build_catalogo(candidatos, sku_map)
     base_rag    = _construir_base_rag(exemplos or [], aliases)
     exemplos_txt = _recuperar_exemplos(texto, base_rag)
 
+    linhas_numeradas = "\n".join(f"{i+1}: {l}" for i, l in enumerate(linhas))
     prompt = (
         f"Catálogo de produtos de vernizes/unhas:\n{catalogo}\n"
         f"{exemplos_txt}\n"
-        f"Mensagem de encomenda:\n{texto}\n\n"
+        f"Mensagem de encomenda (com número de linha):\n{linhas_numeradas}\n\n"
         "Identifica TODOS os produtos mencionados e as suas quantidades.\n"
         "Usa o nome EXATO do catálogo acima — não inventes nomes.\n"
         "Se um produto não estiver no catálogo, ignora-o.\n"
+        "IMPORTANTE: Linhas como 'Verniz normal', 'Cores novas ...' e 'De cada' isolado são contexto/instruções, não produtos.\n"
         "IMPORTANTE: Se a mensagem disser 'X de cada' (ex: 'limas retas 1 de cada'), "
         "lista TODOS os produtos do catálogo que correspondam a X, cada um com a quantidade indicada.\n"
         "IMPORTANTE: 'direita'/'diretas' = 'reta'/'retas' no contexto de limas.\n"
         'Responde APENAS com JSON válido (sem texto antes ou depois):\n'
-        '[{"produto": "nome exato do catálogo", "quantidade": número}, ...]\n'
+        '[{"produto": "nome exato do catálogo", "quantidade": número, "linha": número_da_linha_de_onde_veio}, ...]\n'
+        "O campo \"linha\" é o número que aparece no início da linha da mensagem onde identificaste o produto. "
+        "Se vier de várias linhas, usa a mais relevante. Se não conseguires determinar, omite o campo.\n"
         "Se não houver produtos, responde []."
     )
 
     try:
         r = client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=max(512, len(linhas) * 25),
+            max_tokens=max(512, len(linhas) * 30),
             messages=[{"role": "user", "content": prompt}]
         )
         raw = r.content[0].text
@@ -213,12 +237,14 @@ def processar_texto(texto: str, produtos: list, sku_map: dict, aliases: dict, cl
         items = _parse_json(raw)
     except Exception as e:
         print(f"[AI texto] erro: {e}")
-        return []
+        raise RuntimeError(f"Erro ao chamar Claude: {e}") from e
 
     resultados = []
     for item in items:
         match = _match_produto(item.get("produto", ""), produtos)
         if match:
             produto_real, score = match
-            resultados.append((produto_real, score, int(item.get("quantidade", 1))))
+            linha_idx = item.get("linha")
+            linha_idx = int(linha_idx) if linha_idx is not None else None
+            resultados.append((produto_real, score, int(item.get("quantidade", 1)), linha_idx))
     return resultados
