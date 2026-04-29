@@ -89,9 +89,9 @@ def _load_pipeline():
         if api_key:
             pl.init_ai_client(api_key)
             print("[AI] Claude inicializado como complemento.")
-        produtos, emb_prod, sku_map, freq_palavras, palavras_unicas = pl.load_produtos()
+        produtos, emb_prod, sku_map, freq_palavras, palavras_unicas, aliases = pl.load_produtos()
         _pipeline = {"pl": pl, "produtos": produtos, "emb_prod": emb_prod,
-                     "sku_map": sku_map, "aliases": {}, "ai_client": None,
+                     "sku_map": sku_map, "aliases": aliases, "ai_client": None,
                      "freq_palavras": freq_palavras, "palavras_unicas": palavras_unicas}
 
     print("[pipeline] Pronto.")

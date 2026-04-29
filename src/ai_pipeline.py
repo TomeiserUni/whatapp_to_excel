@@ -32,15 +32,6 @@ def _build_catalogo(candidatos: list, sku_map: dict) -> str:
     return "\n".join(f"- {p} (REF: {sku_map.get(p, 'N/D')})" for p in candidatos)
 
 
-def _build_aliases_txt(aliases: dict, sku_map: dict) -> str:
-    if not aliases:
-        return ""
-    lines = "\n".join(
-        f'  "{k}" → {v} (REF: {sku_map.get(v, "N/D")})'
-        for k, v in aliases.items()
-    )
-    return f"\nNomes alternativos conhecidos:\n{lines}\n"
-
 
 def _match_produto(nome_ai: str, produtos: list) -> tuple[str, float] | None:
     for p in produtos:
@@ -68,7 +59,7 @@ def _parse_json(texto: str) -> list:
         return []
 
 
-_SINONIMOS = {"direita": "reta", "diretas": "retas", "direto": "reto"}
+_SINONIMOS = {"direita": "reta", "diretas": "retas", "direto": "reto", "moon": "meia lua", "moons": "meia lua"}
 
 def _normalizar_linha(linha: str) -> str:
     for orig, sub in _SINONIMOS.items():
@@ -114,21 +105,34 @@ def _extrair_texto_imagem(image_path: Path, client) -> str:
         return ""
 
 
-def _build_exemplos_txt(exemplos: list) -> str:
-    if not exemplos:
-        return ""
-    lines = []
+def _construir_base_rag(exemplos: list, aliases: dict) -> list[dict]:
+    """Constrói a base de conhecimento: todos os pares escrito→produto."""
+    base = []
+    for escrito, produto in (aliases or {}).items():
+        base.append({"escrito": escrito, "produto": produto})
     for e in exemplos:
         escrito = e.get("escrito", "")
         if "produtos" in e:
-            destino = ", ".join(e["produtos"])
+            produto = ", ".join(e["produtos"])
         else:
-            destino = e.get("produto", "")
-        if escrito and destino:
-            lines.append(f'  "{escrito}" → {destino}')
-    if not lines:
+            produto = e.get("produto", "")
+        if escrito and produto:
+            base.append({"escrito": escrito, "produto": produto})
+    return base
+
+
+def _recuperar_exemplos(texto: str, base_rag: list[dict], top_k: int = 12) -> str:
+    """RAG: recupera os exemplos mais relevantes para o texto atual."""
+    if not base_rag:
         return ""
-    return f"\nExemplos de como as clientes escrevem os produtos:\n" + "\n".join(lines) + "\n"
+    scored = sorted(
+        base_rag,
+        key=lambda e: fuzz.partial_ratio(e["escrito"].lower(), texto.lower()),
+        reverse=True
+    )
+    relevantes = scored[:top_k]
+    lines = [f'  "{e["escrito"]}" → {e["produto"]}' for e in relevantes]
+    return "\nExemplos de correspondências anteriores (mais relevantes para este pedido):\n" + "\n".join(lines) + "\n"
 
 
 def processar_imagem(image_path: Path, produtos: list, sku_map: dict, aliases: dict, client, exemplos: list = None) -> list:
@@ -167,13 +171,12 @@ def processar_texto(texto: str, produtos: list, sku_map: dict, aliases: dict, cl
                 candidatos_set.add(produto)
 
     candidatos = list(candidatos_set)[:60]
-    catalogo      = _build_catalogo(candidatos, sku_map)
-    alias_txt     = _build_aliases_txt(aliases, sku_map)
-    exemplos_txt  = _build_exemplos_txt(exemplos or [])
+    catalogo    = _build_catalogo(candidatos, sku_map)
+    base_rag    = _construir_base_rag(exemplos or [], aliases)
+    exemplos_txt = _recuperar_exemplos(texto, base_rag)
 
     prompt = (
         f"Catálogo de produtos de vernizes/unhas:\n{catalogo}\n"
-        f"{alias_txt}"
         f"{exemplos_txt}\n"
         f"Mensagem de encomenda:\n{texto}\n\n"
         "Identifica TODOS os produtos mencionados e as suas quantidades.\n"

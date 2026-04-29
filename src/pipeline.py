@@ -5,7 +5,6 @@ import numpy as np
 import easyocr
 from sentence_transformers import SentenceTransformer
 import re
-import math
 from rapidfuzz import fuzz
 import openpyxl
 
@@ -114,7 +113,8 @@ def load_produtos():
     # Pré-computar uma vez — evita recalcular a cada linha no server
     _cache_freq_palavras = calcular_freq_palavras(produtos, STOPWORDS)
     _cache_palavras_unicas = calcular_palavras_unicas(produtos)
-    return produtos, embeddings, sku_map, _cache_freq_palavras, _cache_palavras_unicas
+    _cache_aliases = load_aliases()
+    return produtos, embeddings, sku_map, _cache_freq_palavras, _cache_palavras_unicas, _cache_aliases
 
 def load_aliases() -> dict[str, str]:
     """
@@ -330,14 +330,19 @@ def encontrar_produtos_ia(trecho, produtos, emb_prod):
 
 def encontrar_produtos_levenshtein(trecho, produtos, freq_palavras=None):
     palavras_trecho = set(trecho.split())
+
+    # Pré-filtro rápido: top-30 candidatos com token_set_ratio (C nativo, muito rápido)
+    # Evita correr o matching detalhado contra todos os 1048 produtos
+    from rapidfuzz import process as rp
+    pre = rp.extract(trecho, produtos, scorer=fuzz.token_set_ratio, limit=30)
+    candidatos = [r[0] for r in pre]
+
     scores = []
-    for p in produtos:
+    for p in candidatos:
         palavras_produto = set(p.lower().split())
         s_set = fuzz.token_set_ratio(trecho, p.lower()) / 100
-        # Comparação sem espaços: apanha palavras concatenadas (ex: "noblue" ≡ "no blue")
         s_set = max(s_set, fuzz.ratio(trecho.replace(" ", ""), p.lower().replace(" ", "")) / 100)
 
-        # Parear palavras com fuzzy matching para não penalizar typos (ex: tammy↔tawny)
         matched_t, matched_p = set(), set()
         for w_t in palavras_trecho:
             if w_t in palavras_produto:
@@ -351,13 +356,10 @@ def encontrar_produtos_levenshtein(trecho, produtos, freq_palavras=None):
             if best_r >= 58:
                 matched_t.add(w_t); matched_p.add(best_p)
 
-        # Penalizar apenas palavras verdadeiramente sem par
-        # (excluir stopwords e unidades — o utilizador raramente as escreve)
         extra_produto = len((palavras_produto - matched_p) - STOPWORDS - UNIDADES) * 0.06
         extra_trecho = 0.0
         for w in palavras_trecho - matched_t:
             freq = freq_palavras.get(w, 0) if freq_palavras else 0
-            # palavras comuns penalizam menos (ex: "maria" em muitos produtos)
             especificidade = min(1.0, 1.0 / max(1, freq))
             extra_trecho += 0.10 * especificidade
 
@@ -635,6 +637,8 @@ SINONIMOS = {
     "direita": "reta",
     "diretas": "retas",
     "direto":  "reto",
+    "moon":    "meia lua",
+    "moons":   "meia lua",
 }
 
 _DE_CADA = re.compile(
@@ -647,7 +651,7 @@ def _aplicar_sinonimos(texto: str) -> str:
         texto = re.sub(rf'\b{original}\b', substituto, texto)
     return texto
 
-def _expandir_de_cada(linha: str, produtos: list, freq_palavras: dict, qty_override: int = 1) -> list[tuple[str, float, int]] | None:
+def _expandir_de_cada(linha: str, produtos: list, qty_override: int = 1) -> list[tuple[str, float, int]] | None:
     """Se a linha tiver padrão 'X de cada', devolve todos os produtos que correspondem a X."""
     m = _DE_CADA.match(linha.strip())
     if not m:
@@ -780,9 +784,9 @@ def processar_texto(texto: str, produtos: list, emb_prod,
     ordem:  dict[str, int] = {}
     for i, linha in enumerate(linhas):
         # Padrão "X de cada" → expande para todas as variantes
-        de_cada = _expandir_de_cada(linha, produtos, freq_palavras)
+        de_cada = _expandir_de_cada(linha, produtos)
         if de_cada:
-            for produto, score, qty in de_cada:
+            for produto, score, _qty in de_cada:
                 if produto not in melhor or score > melhor[produto][0]:
                     melhor[produto] = (score, linha)
                 if produto not in ordem:
