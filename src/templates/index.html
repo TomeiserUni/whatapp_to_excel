@@ -87,10 +87,10 @@
 <div id="settings-modal">
   <div id="settings-box">
     <h3>Definições</h3>
-    <label>NVIDIA API Key <span style="color:#546e7a;font-size:.78rem;">(opcional — melhora matches ambíguos)</span></label>
+    <label> API Key <span style="color:#546e7a;font-size:.78rem;">(opcional — melhora matches ambíguos)</span></label>
     <div class="key-row">
-      <input id="api-key-input" type="password" placeholder="nvapi-…">
-      <button class="btn-secondary" onclick="toggleShowKey()">👁</button>
+      <input id="api-key-input" type="password" placeholder="api_key-…">
+      <button class="btn-secondary" onclick="toggleShowKey()"></button>
     </div>
     <div id="key-status"></div>
     <div class="settings-actions">
@@ -264,13 +264,19 @@ function adicionarResultados(data) {
   resultados.push(...data);
   const tbody = document.getElementById('tbody');
   data.forEach(row => {
-    const cls = row.score >= 0.95 ? 'score-high' : row.score >= 0.85 ? 'score-mid' : 'score-low';
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${row.produto}</td><td>${row.qtd}</td><td class="${cls}">${row.score}</td><td>${row.ref}</td><td style="color:#90caf9">${row.ficheiro}</td>`;
+    if (!row.produto) {
+      tr.style.opacity = '0.35';
+      tr.innerHTML = `<td colspan="5" style="font-style:italic;color:#546e7a;">— não identificado —</td>`;
+    } else {
+      const cls = row.score >= 0.95 ? 'score-high' : row.score >= 0.85 ? 'score-mid' : 'score-low';
+      tr.innerHTML = `<td>${row.produto}</td><td>${row.qtd}</td><td class="${cls}">${row.score}</td><td>${row.ref}</td><td style="color:#90caf9">${row.ficheiro}</td>`;
+    }
     tbody.appendChild(tr);
   });
-  document.getElementById('total-txt').textContent = `${resultados.length} produto(s)`;
-  document.getElementById('btn-export').disabled = false;
+  const identificados = resultados.filter(r => r.produto).length;
+  document.getElementById('total-txt').textContent = `${identificados} produto(s) identificado(s)`;
+  document.getElementById('btn-export').disabled = identificados === 0;
 }
 
 function limpar() {

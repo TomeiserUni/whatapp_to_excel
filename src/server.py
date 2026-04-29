@@ -113,14 +113,17 @@ def processar():
                 rows = pl["pl"].processar_imagem(tmp_path, pl["produtos"], pl["sku_map"], pl["aliases"], pl["ai_client"])
             else:
                 rows = pl["pl"].processar_imagem(tmp_path, pl["produtos"], pl["emb_prod"])
-            for produto, score, qty in rows:
-                resultados.append({
-                    "ficheiro": f.filename,
-                    "produto":  produto,
-                    "qtd":      qty,
-                    "score":    round(score, 3),
-                    "ref":      pl["sku_map"].get(produto, ""),
-                })
+            if rows:
+                for produto, score, qty in rows:
+                    resultados.append({
+                        "ficheiro": f.filename,
+                        "produto":  produto,
+                        "qtd":      qty,
+                        "score":    round(score, 3),
+                        "ref":      pl["sku_map"].get(produto, ""),
+                    })
+            else:
+                resultados.append({"ficheiro": f.filename, "produto": "", "qtd": "", "score": 0, "ref": ""})
         finally:
             tmp_path.unlink(missing_ok=True)
 
@@ -137,17 +140,25 @@ def processar_texto():
         return jsonify([])
 
     pl = _pipeline
-    if IS_CLOUD:
-        rows = pl["pl"].processar_texto(texto, pl["produtos"], pl["sku_map"], pl["aliases"], pl["ai_client"])
-    else:
-        rows = pl["pl"].processar_texto(texto, pl["produtos"], pl["emb_prod"])
-    return jsonify([{
-        "ficheiro": "texto colado",
-        "produto":  p,
-        "qtd":      q,
-        "score":    round(s, 3),
-        "ref":      pl["sku_map"].get(p, ""),
-    } for p, s, q in rows])
+    linhas = [l.strip() for l in texto.splitlines() if l.strip()]
+    resultados = []
+    for linha in linhas:
+        if IS_CLOUD:
+            rows = pl["pl"].processar_texto(linha, pl["produtos"], pl["sku_map"], pl["aliases"], pl["ai_client"])
+        else:
+            rows = pl["pl"].processar_texto(linha, pl["produtos"], pl["emb_prod"])
+        if rows:
+            for p, s, q in rows:
+                resultados.append({
+                    "ficheiro": "texto colado",
+                    "produto":  p,
+                    "qtd":      q,
+                    "score":    round(s, 3),
+                    "ref":      pl["sku_map"].get(p, ""),
+                })
+        else:
+            resultados.append({"ficheiro": "texto colado", "produto": "", "qtd": "", "score": 0, "ref": ""})
+    return jsonify(resultados)
 
 
 @app.route("/exportar", methods=["POST"])
