@@ -11,6 +11,5 @@ COPY data/sku_map.pkl ./data/
 COPY data/aliases.json ./data/
 
 ENV PYTHONUNBUFFERED=1
-ENV RAILWAY_ENVIRONMENT=production
 
 CMD ["python", "src/server.py"]
