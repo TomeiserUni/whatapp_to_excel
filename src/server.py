@@ -79,21 +79,36 @@ def _load_pipeline():
 
     if IS_CLOUD:
         import anthropic
-        import ai_pipeline as pl
+        import ai_pipeline as ai_pl
         client = anthropic.Anthropic(api_key=api_key)
-        produtos, sku_map, aliases, exemplos = pl.load_produtos(_BUNDLE / "data")
-        _pipeline = {"pl": pl, "produtos": produtos, "emb_prod": None,
+        produtos, sku_map, aliases, exemplos = ai_pl.load_produtos(_BUNDLE / "data")
+        _pipeline = {"pl": ai_pl, "ai_pl": ai_pl, "produtos": produtos, "emb_prod": None,
                      "sku_map": sku_map, "aliases": aliases, "exemplos": exemplos, "ai_client": client}
     else:
-        # Local: pipeline completo com embeddings + EasyOCR
+        # Local: pipeline ML para imagens (EasyOCR + embeddings)
         import pipeline as pl
-        if api_key:
-            pl.init_ai_client(api_key)
-            print("[AI] Claude inicializado como complemento.")
         produtos, emb_prod, sku_map, freq_palavras, palavras_unicas, aliases = pl.load_produtos()
         _pipeline = {"pl": pl, "produtos": produtos, "emb_prod": emb_prod,
                      "sku_map": sku_map, "aliases": aliases, "ai_client": None,
-                     "freq_palavras": freq_palavras, "palavras_unicas": palavras_unicas}
+                     "freq_palavras": freq_palavras, "palavras_unicas": palavras_unicas,
+                     "ai_pl": None, "exemplos": []}
+
+        # Se tiver API key: carrega também ai_pipeline para texto (muito mais rápido)
+        if api_key:
+            import anthropic
+            import ai_pipeline as ai_pl
+            client = anthropic.Anthropic(api_key=api_key)
+            ai_prods, ai_sku, ai_aliases, exemplos = ai_pl.load_produtos(_BUNDLE / "data")
+            pl.init_ai_client(api_key)
+            _pipeline.update({
+                "ai_pl":      ai_pl,
+                "ai_client":  client,
+                "ai_produtos": ai_prods,
+                "ai_sku_map": ai_sku,
+                "ai_aliases": ai_aliases,
+                "exemplos":   exemplos,
+            })
+            print("[AI] Claude ativo para texto (batches paralelos).")
 
     print("[pipeline] Pronto.")
 
@@ -277,22 +292,30 @@ def processar_texto():
     linhas = [l for l in _preprocessar_texto(texto) if l.strip()]
     resultados = []
 
-    if IS_CLOUD:
-        # Batches paralelos: divide em grupos de 15 e chama a API em simultâneo
+    ai_pl     = pl.get("ai_pl")
+    ai_client = pl.get("ai_client")
+    use_ai    = bool(ai_pl and ai_client)
+
+    if use_ai:
+        # Batches paralelos com Claude (cloud ou local com API key)
         from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
         from rapidfuzz import fuzz as _rfuzz
+
+        prods_t   = pl["ai_produtos"] if not IS_CLOUD else pl["produtos"]
+        sku_t     = pl["ai_sku_map"]  if not IS_CLOUD else pl["sku_map"]
+        aliases_t = pl["ai_aliases"]  if not IS_CLOUD else pl["aliases"]
+        exemplos_t = pl.get("exemplos", [])
 
         _BATCH = 15
         batches = [linhas[i:i + _BATCH] for i in range(0, len(linhas), _BATCH)]
 
-        raw_rows: list[tuple] = []  # (row, batch)
+        raw_rows: list[tuple] = []
         with ThreadPoolExecutor(max_workers=min(len(batches), 6)) as pool:
             futs = {
                 pool.submit(
-                    pl["pl"].processar_texto,
+                    ai_pl.processar_texto,
                     "\n".join(b),
-                    pl["produtos"], pl["sku_map"], pl["aliases"],
-                    pl["ai_client"], pl.get("exemplos", [])
+                    prods_t, sku_t, aliases_t, ai_client, exemplos_t
                 ): b
                 for b in batches
             }
@@ -304,13 +327,13 @@ def processar_texto():
                 except Exception as e:
                     print(f"[batch] erro: {e}")
 
-        # Deduplicar por produto (mantém score mais alto)
         melhor: dict[str, tuple] = {}
         for row, b in raw_rows:
             p = row[0]
             if p not in melhor or row[1] > melhor[p][0][1]:
                 melhor[p] = (row, b)
 
+        sku_final = pl.get("ai_sku_map") or pl["sku_map"]
         if melhor:
             for p, (row, b) in melhor.items():
                 _, s, q = row[0], row[1], row[2]
@@ -320,29 +343,30 @@ def processar_texto():
                     "produto":      p,
                     "qtd":          q,
                     "score":        round(s, 3),
-                    "ref":          pl["sku_map"].get(p, ""),
+                    "ref":          sku_final.get(p, ""),
                     "texto_origem": origem,
                 })
         else:
             resultados.append({"ficheiro": "texto colado", "produto": "", "qtd": "", "score": 0, "ref": "", "texto_origem": ""})
     else:
-        for linha in linhas:
-            rows = pl["pl"].processar_texto(linha, pl["produtos"], pl["emb_prod"],
-                                             pl.get("freq_palavras"), pl.get("palavras_unicas"))
-            if rows:
-                for row in rows:
-                    p, s, q = row[0], row[1], row[2]
-                    trecho = row[3] if len(row) > 3 else linha
-                    resultados.append({
-                        "ficheiro":     "texto colado",
-                        "produto":      p,
-                        "qtd":          q,
-                        "score":        round(s, 3),
-                        "ref":          pl["sku_map"].get(p, ""),
-                        "texto_origem": trecho or linha,
-                    })
-            else:
-                resultados.append({"ficheiro": "texto colado", "produto": "", "qtd": "", "score": 0, "ref": "", "texto_origem": linha})
+        # Sem API key: pipeline local ML (lento para ordens grandes)
+        texto_proc = "\n".join(linhas)
+        rows = pl["pl"].processar_texto(texto_proc, pl["produtos"], pl["emb_prod"],
+                                         pl.get("freq_palavras"), pl.get("palavras_unicas"))
+        if rows:
+            for row in rows:
+                p, s, q = row[0], row[1], row[2]
+                trecho = row[3] if len(row) > 3 else ""
+                resultados.append({
+                    "ficheiro":     "texto colado",
+                    "produto":      p,
+                    "qtd":          q,
+                    "score":        round(s, 3),
+                    "ref":          pl["sku_map"].get(p, ""),
+                    "texto_origem": trecho or "",
+                })
+        else:
+            resultados.append({"ficheiro": "texto colado", "produto": "", "qtd": "", "score": 0, "ref": "", "texto_origem": ""})
 
     return jsonify(resultados)
 

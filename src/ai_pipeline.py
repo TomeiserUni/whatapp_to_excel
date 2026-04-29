@@ -25,7 +25,12 @@ def load_produtos(data_dir: Path):
             exemplos = json.load(f)
     except FileNotFoundError:
         exemplos = []
-    return produtos, sku_map, aliases, exemplos
+    try:
+        with open(data_dir / "context.json") as f:
+            context = json.load(f)
+    except FileNotFoundError:
+        context = {}
+    return produtos, sku_map, aliases, exemplos, context
 
 
 def _build_catalogo(candidatos: list, sku_map: dict) -> str:
