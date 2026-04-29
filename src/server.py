@@ -1,12 +1,14 @@
 import io
 import os
+import secrets
 import sys
 import tempfile
 import threading
 import webbrowser
+from functools import wraps
 from pathlib import Path
 
-from flask import Flask, jsonify, render_template, request, send_file
+from flask import Flask, jsonify, redirect, render_template, request, send_file, session
 
 # ── Ambiente ─────────────────────────────────────────────────────
 IS_CLOUD  = bool(os.environ.get("RAILWAY_ENVIRONMENT") or os.environ.get("RENDER"))
@@ -31,8 +33,40 @@ if OUTPUT_DIR:
 template_folder = str(_BUNDLE / "src" / "templates")
 app = Flask(__name__, template_folder=template_folder)
 app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50 MB
+app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
 
 _pipeline = None
+
+
+# ── Autenticação ──────────────────────────────────────────────────
+def login_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if os.environ.get("APP_PASSWORD") and not session.get("authenticated"):
+            return redirect("/login")
+        return f(*args, **kwargs)
+    return decorated
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    error = None
+    if request.method == "POST":
+        username = request.form.get("username", "")
+        password = request.form.get("password", "")
+        ok_user = (username == os.environ.get("APP_USERNAME", ""))
+        ok_pass = (password == os.environ.get("APP_PASSWORD", ""))
+        if ok_user and ok_pass:
+            session["authenticated"] = True
+            return redirect("/")
+        error = "Utilizador ou password incorretos."
+    return render_template("login.html", error=error)
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect("/login")
 
 
 def _load_pipeline():
@@ -64,37 +98,53 @@ def _load_pipeline():
 
 # ── Rotas ─────────────────────────────────────────────────────────
 @app.route("/")
+@login_required
 def index():
     return render_template("index.html")
 
 
 @app.route("/status")
+@login_required
 def status():
     return jsonify({"ready": _pipeline is not None})
 
 
 @app.route("/config", methods=["GET"])
+@login_required
 def get_config():
     key = os.environ.get("ANTHROPIC_API_KEY", "")
     return jsonify({"configured": bool(key)})
 
 
 @app.route("/config", methods=["POST"])
+@login_required
 def set_config():
     data = request.json or {}
-    key = data.get("api_key", "").strip()
-    if not key:
-        return jsonify({"error": "Chave vazia"}), 400
     env_path = _USER_DIR / ".env"
     from dotenv import set_key as dotenv_set_key
-    dotenv_set_key(str(env_path), "ANTHROPIC_API_KEY", key)
-    os.environ["ANTHROPIC_API_KEY"] = key
-    if _pipeline is not None and not IS_CLOUD:
-        _pipeline["pl"].init_ai_client(key)
+
+    key = data.get("api_key", "").strip()
+    if key:
+        dotenv_set_key(str(env_path), "ANTHROPIC_API_KEY", key)
+        os.environ["ANTHROPIC_API_KEY"] = key
+        if _pipeline is not None and not IS_CLOUD:
+            _pipeline["pl"].init_ai_client(key)
+
+    username = data.get("app_username", "").strip()
+    if username:
+        dotenv_set_key(str(env_path), "APP_USERNAME", username)
+        os.environ["APP_USERNAME"] = username
+
+    password = data.get("app_password", "").strip()
+    if password:
+        dotenv_set_key(str(env_path), "APP_PASSWORD", password)
+        os.environ["APP_PASSWORD"] = password
+
     return jsonify({"ok": True})
 
 
 @app.route("/processar", methods=["POST"])
+@login_required
 def processar():
     if _pipeline is None:
         return jsonify({"error": "Modelos ainda a carregar…"}), 503
@@ -130,6 +180,7 @@ def processar():
 
 
 @app.route("/processar_texto", methods=["POST"])
+@login_required
 def processar_texto():
     if _pipeline is None:
         return jsonify({"error": "Modelos ainda a carregar…"}), 503
@@ -161,6 +212,7 @@ def processar_texto():
 
 
 @app.route("/exportar", methods=["POST"])
+@login_required
 def exportar():
     import openpyxl
     data = request.json or []

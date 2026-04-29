@@ -81,6 +81,7 @@
     <div id="status-dot"></div>
     <span id="status-txt">A carregar modelos…</span>
     <button class="btn-secondary" onclick="abrirSettings()" style="padding:5px 10px; font-size:.8rem; margin-left:12px;">⚙ Definições</button>
+    <a href="/logout" style="padding:5px 10px; font-size:.8rem; background:#37474f; color:#e0e0e0; border-radius:7px; text-decoration:none; margin-left:6px;">Sair</a>
   </div>
 </header>
 
@@ -93,9 +94,14 @@
       <button class="btn-secondary" onclick="toggleShowKey()"></button>
     </div>
     <div id="key-status"></div>
+    <hr style="border-color:#0f3460; margin:18px 0;">
+    <label>Utilizador do site <span style="color:#546e7a;font-size:.78rem;">(para proteger o acesso)</span></label>
+    <input id="app-username" type="text" placeholder="ex: admin" style="width:100%; padding:8px 12px; background:#0f3460; border:1px solid #1565c0; border-radius:7px; color:#e0e0e0; font-size:.88rem; margin-bottom:8px;">
+    <label>Password do site</label>
+    <input id="app-password" type="password" placeholder="••••••••" style="width:100%; padding:8px 12px; background:#0f3460; border:1px solid #1565c0; border-radius:7px; color:#e0e0e0; font-size:.88rem;">
     <div class="settings-actions">
       <button class="btn-secondary" onclick="fecharSettings()">Cancelar</button>
-      <button class="btn-primary" onclick="guardarKey()">Guardar</button>
+      <button class="btn-primary" onclick="guardarSettings()">Guardar</button>
     </div>
   </div>
 </div>
@@ -315,18 +321,24 @@ function toggleShowKey() {
   input.type = input.type === 'password' ? 'text' : 'password';
 }
 
-async function guardarKey() {
+async function guardarSettings() {
+  const payload = {};
   const key = document.getElementById('api-key-input').value.trim();
-  if (!key) { alert('Introduz uma chave válida.'); return; }
+  if (key) payload.api_key = key;
+  const username = document.getElementById('app-username').value.trim();
+  if (username) payload.app_username = username;
+  const password = document.getElementById('app-password').value.trim();
+  if (password) payload.app_password = password;
+  if (!Object.keys(payload).length) { fecharSettings(); return; }
   const r = await fetch('/config', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ api_key: key })
+    body: JSON.stringify(payload)
   });
   const d = await r.json();
   const statusEl = document.getElementById('key-status');
   if (d.ok) {
-    statusEl.textContent = 'Chave guardada com sucesso!';
+    statusEl.textContent = 'Guardado com sucesso!';
     statusEl.style.color = '#66bb6a';
     setTimeout(fecharSettings, 1500);
   } else {
