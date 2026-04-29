@@ -1,5 +1,6 @@
 import io
 import os
+import re
 import secrets
 import sys
 import tempfile
@@ -95,6 +96,79 @@ def _load_pipeline():
                      "freq_palavras": freq_palavras, "palavras_unicas": palavras_unicas}
 
     print("[pipeline] Pronto.")
+
+
+# ── Pré-processamento de texto ─────────────────────────────────────
+def _expandir_lista_qty_partilhada(linha: str) -> list[str] | None:
+    """
+    "Prod1, Prod2 e Prod3 50g-16un" → ["Prod1 16", "Prod2 16", "Prod3 16"]
+    Só expande se houver pelo menos uma vírgula na parte dos produtos.
+    """
+    m = re.search(
+        r'(?:[\d,.]+\s*(?:g|gr|gramas?|ml)\s*-\s*)?(\d+)\s*(?:un(?:idades?)?|pcs?)\s*$',
+        linha, re.IGNORECASE
+    )
+    if not m:
+        return None
+    qty = m.group(1)
+    parte = linha[:m.start()].strip().rstrip(',').strip()
+    if ',' not in parte:
+        return None
+    nomes = re.split(r'\s*,\s*|\s+e\s+', parte, flags=re.IGNORECASE)
+    nomes = [n.strip() for n in nomes if n.strip()]
+    if len(nomes) < 2:
+        return None
+    return [f"{nome} {qty}" for nome in nomes]
+
+
+def _preprocessar_texto(texto: str) -> list[str]:
+    """
+    1. Une linhas de continuação (começam com ',' ou 'e ', ou a linha anterior
+       termina em ',' ou ' e').
+    2. Expande listas com quantidade partilhada no fim.
+       Ex: "Gel transparente ,\nbranco leitoso\n,branco leitoso intenso\nPanacota 50g-16un"
+           → ["Gel transparente 16", "branco leitoso 16", "branco leitoso intenso 16", "Panacota 16"]
+    """
+    raw = [l.strip() for l in texto.splitlines()]
+
+    joined = []
+    buf = ""
+    for l in raw:
+        if not l:
+            if buf:
+                joined.append(buf)
+                buf = ""
+            continue
+
+        l_sep = l.startswith(',') or l.lower().startswith('e ')
+        b_sep = buf.endswith(',') or buf.lower().endswith(' e')
+
+        if buf and (l_sep or b_sep):
+            # limpar fim do buf
+            b = buf.rstrip()
+            if b.endswith(','):
+                b = b[:-1].rstrip()
+            elif b.lower().endswith(' e'):
+                b = b[:-2].rstrip()
+            # limpar início de l
+            c = l.lstrip()
+            if c.startswith(','):
+                c = c[1:].lstrip()
+            elif c.lower().startswith('e '):
+                c = c[2:].lstrip()
+            buf = b + ', ' + c
+        else:
+            if buf:
+                joined.append(buf)
+            buf = l
+    if buf:
+        joined.append(buf)
+
+    resultado = []
+    for linha in joined:
+        exp = _expandir_lista_qty_partilhada(linha)
+        resultado.extend(exp if exp else [linha])
+    return resultado
 
 
 # ── Rotas ─────────────────────────────────────────────────────────
@@ -200,7 +274,7 @@ def processar_texto():
         return jsonify([])
 
     pl = _pipeline
-    linhas = [l.strip() for l in texto.splitlines() if l.strip()]
+    linhas = [l for l in _preprocessar_texto(texto) if l.strip()]
     resultados = []
     for linha in linhas:
         if IS_CLOUD:
