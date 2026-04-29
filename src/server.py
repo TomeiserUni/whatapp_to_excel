@@ -238,7 +238,7 @@ def exportar():
 if __name__ == "__main__":
     threading.Thread(target=_load_pipeline, daemon=True).start()
     PORT = int(os.environ.get("PORT", 5000 if sys.platform == "win32" else 5001))
-    HOST = "0.0.0.0" if IS_CLOUD else "127.0.0.1"
+    HOST = "0.0.0.0"
     if not IS_CLOUD:
         threading.Timer(1.5, lambda: webbrowser.open(f"http://localhost:{PORT}")).start()
     from waitress import serve
