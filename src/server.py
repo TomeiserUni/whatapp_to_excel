@@ -286,6 +286,70 @@ def _expandir_aliases_diretos(linhas: list[str], aliases: dict, sku_map: dict) -
     return resultados
 
 
+_RE_LISTA_VARIANTES = re.compile(
+    r"""^\s*(?:\d+\s+)?                              # qty inicial opcional
+        ([a-záàâãéèêíóôõúç ]+?)\s+                    # base (palavras alfabéticas)
+        (\d+(?:\s*,\s*\d+){1,})\s+                    # 2+ números separados por vírgula
+        (\d+)\s*                                       # qty final
+        (?:un\w*|pcs?|cada|de\s+cada)\b""",
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def _expandir_lista_variantes_numeradas(linhas: list[str], produtos: list[str], sku_map: dict) -> list[dict]:
+    """
+    Padrão "BASE N1,N2,N3,... QTY [un|cada|de cada]" → expande para BASE+N1, BASE+N2, ...
+    Cada variante recebe a quantidade QTY.
+
+    Ex: "Acrigel 5,6,7,9 6 unidades cada" →
+        polyacrygel 5/6/7/9 com qty=6 cada (4 produtos).
+
+    Para cada número, escolhe o único produto do catálogo que tem esse número como token
+    e cuja base faz match (fuzz ≥ 70). Se houver ambiguidade, salta esse número.
+    """
+    from rapidfuzz import fuzz
+
+    resultados = []
+    for idx, linha in enumerate(linhas, 1):
+        m = _RE_LISTA_VARIANTES.match(linha)
+        if not m:
+            continue
+        base = m.group(1).strip().lower()
+        nums = re.findall(r"\d+", m.group(2))
+        qty = int(m.group(3))
+        if len(nums) < 2 or not base:
+            continue
+
+        for num in nums:
+            candidatos = []
+            for p in produtos:
+                if num not in p.lower().split():
+                    continue
+                score = max(
+                    fuzz.partial_ratio(base, p.lower()),
+                    fuzz.token_set_ratio(base, p.lower()),
+                )
+                if score >= 70:
+                    candidatos.append((p, score))
+            candidatos.sort(key=lambda x: -x[1])
+            # único candidato OU primeiro com margem clara sobre o segundo
+            if not candidatos:
+                continue
+            if len(candidatos) > 1 and candidatos[0][1] - candidatos[1][1] < 10:
+                continue
+            produto = candidatos[0][0]
+            resultados.append({
+                "ficheiro":     "texto colado",
+                "produto":      produto,
+                "qtd":          qty,
+                "score":        1.0,
+                "ref":          sku_map.get(produto, ""),
+                "texto_origem": f"linha {idx}: {linha}",
+                "_linha_idx":   idx,
+            })
+    return resultados
+
+
 def _expandir_regras_de_cada(linhas: list[str], sku_map: dict) -> list[dict]:
     produtos_moldes_f1 = [
         "moldes f1 quadrado",
@@ -676,6 +740,7 @@ def processar_texto():
         sku_final = pl.get("ai_sku_map") or pl["sku_map"]
         resultados.extend(_expandir_aliases_diretos(linhas, aliases_t, sku_final))
         resultados.extend(_expandir_identificadores_unicos(linhas, prods_t, sku_final))
+        resultados.extend(_expandir_lista_variantes_numeradas(linhas, prods_t, sku_final))
         resultados.extend(_expandir_regras_de_cada(linhas, sku_final))
         if melhor:
             for p, (row, b) in melhor.items():
@@ -727,6 +792,7 @@ def processar_texto():
                                          pl.get("freq_palavras"), pl.get("palavras_unicas"))
         resultados.extend(_expandir_aliases_diretos(linhas, pl.get("aliases", {}), pl["sku_map"]))
         resultados.extend(_expandir_identificadores_unicos(linhas, pl["produtos"], pl["sku_map"]))
+        resultados.extend(_expandir_lista_variantes_numeradas(linhas, pl["produtos"], pl["sku_map"]))
         resultados.extend(_expandir_regras_de_cada(linhas, pl["sku_map"]))
         if rows:
             for row in rows:

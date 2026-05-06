@@ -72,6 +72,27 @@ def _normalizar_linha(linha: str) -> str:
     return linha
 
 
+def _linhas_com_indices(texto: str) -> list[tuple[int, str]]:
+    """
+    Devolve (numero_original, texto_da_linha).
+
+    O servidor pode enviar batches já numerados com o índice global ("23: texto").
+    Preservar esse número evita que filtros de contexto, como "Cores novas",
+    façam a resposta da AI ficar desalinhada com a tabela final.
+    """
+    linhas = []
+    for fallback_idx, raw in enumerate(texto.splitlines(), 1):
+        linha = raw.strip()
+        if not linha:
+            continue
+        m = re.match(r"^(\d+)\s*[:.)-]\s+(.+)$", linha)
+        if m:
+            linhas.append((int(m.group(1)), m.group(2).strip()))
+        else:
+            linhas.append((fallback_idx, linha))
+    return linhas
+
+
 def _linha_so_contexto(linha: str) -> bool:
     lower = linha.lower().strip()
     lower_sem_qtd = re.sub(r"\b\d+\b", "", lower)
@@ -167,15 +188,20 @@ def processar_texto(texto: str, produtos: list, sku_map: dict, aliases: dict, cl
     Para cada linha, seleciona candidatos com rapidfuzz.
     Envia texto + candidatos ao Claude para matching final.
     """
-    linhas = [l.strip() for l in texto.splitlines() if l.strip()]
-    if not linhas:
+    linhas_indexadas = _linhas_com_indices(texto)
+    if not linhas_indexadas:
         return []
 
     # Filtrar linhas com termos ignorados (alias com valor "")
     _ignorar = {k for k, v in (aliases or {}).items() if v == ""}
-    linhas = [l for l in linhas if not _linha_so_contexto(l) and not any(t in l.lower() for t in _ignorar)]
-    if not linhas:
+    linhas_indexadas = [
+        (idx, linha)
+        for idx, linha in linhas_indexadas
+        if not _linha_so_contexto(linha) and not any(t in linha.lower() for t in _ignorar)
+    ]
+    if not linhas_indexadas:
         return []
+    linhas = [linha for _idx, linha in linhas_indexadas]
 
     # Candidatos por linha (linha a linha evita diluição de score)
     candidatos_score: dict[str, float] = {}
@@ -207,7 +233,7 @@ def processar_texto(texto: str, produtos: list, sku_map: dict, aliases: dict, cl
     base_rag    = _construir_base_rag(exemplos or [], aliases)
     exemplos_txt = _recuperar_exemplos(texto, base_rag)
 
-    linhas_numeradas = "\n".join(f"{i+1}: {l}" for i, l in enumerate(linhas))
+    linhas_numeradas = "\n".join(f"{idx}: {linha}" for idx, linha in linhas_indexadas)
     prompt = (
         f"Catálogo de produtos de vernizes/unhas:\n{catalogo}\n"
         f"{exemplos_txt}\n"
@@ -229,7 +255,7 @@ def processar_texto(texto: str, produtos: list, sku_map: dict, aliases: dict, cl
     try:
         r = client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=max(512, len(linhas) * 30),
+            max_tokens=max(1024, len(linhas) * 80),
             messages=[{"role": "user", "content": prompt}]
         )
         raw = r.content[0].text

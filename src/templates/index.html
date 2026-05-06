@@ -36,7 +36,8 @@
   /* text area */
   #texto-area { margin-top: 12px; }
   #texto-area textarea { width: 100%; height: 90px; background: #0f3460; border: 1px solid #1565c0; border-radius: 8px; color: #e0e0e0; padding: 10px; font-size: 0.85rem; resize: vertical; }
-  #texto-area button { margin-top: 6px; width: 100%; }
+  .texto-actions { display: grid; grid-template-columns: 1fr auto; gap: 8px; margin-top: 6px; }
+  .texto-actions button { width: 100%; white-space: nowrap; }
 
   /* left panel */
   #left { display: flex; flex-direction: column; gap: 12px; width: 270px; flex-shrink: 0; }
@@ -118,7 +119,10 @@
 
     <div id="texto-area">
       <textarea id="texto-input" placeholder="Ou cola aqui o texto da encomenda…"></textarea>
-      <button class="btn-green" id="btn-texto" onclick="processarTexto()">Processar texto</button>
+      <div class="texto-actions">
+        <button class="btn-green" id="btn-texto" onclick="processarTexto()">Processar texto</button>
+        <button class="btn-secondary" type="button" onclick="limpar()">Limpar</button>
+      </div>
     </div>
   </div>
 
@@ -287,6 +291,9 @@ function adicionarResultados(data) {
 
 function limpar() {
   resultados = [];
+  document.getElementById('texto-input').value = '';
+  document.getElementById('file-input').value = '';
+  document.getElementById('drop-zone').classList.remove('drag-over');
   document.getElementById('tbody').innerHTML = '';
   document.getElementById('file-list').innerHTML = '';
   document.getElementById('total-txt').textContent = '';
