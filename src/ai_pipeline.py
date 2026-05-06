@@ -1,0 +1,276 @@
+import base64
+import json
+import pickle
+import re
+from pathlib import Path
+
+from rapidfuzz import fuzz, process
+
+
+def load_produtos(data_dir: Path):
+    with open(data_dir / "prod.pkl", "rb") as f:
+        produtos = pickle.load(f)
+    try:
+        with open(data_dir / "sku_map.pkl", "rb") as f:
+            sku_map = pickle.load(f)
+    except FileNotFoundError:
+        sku_map = {}
+    try:
+        with open(data_dir / "aliases.json") as f:
+            aliases = json.load(f)
+    except FileNotFoundError:
+        aliases = {}
+    try:
+        with open(data_dir / "exemplos.json") as f:
+            exemplos = json.load(f)
+    except FileNotFoundError:
+        exemplos = []
+    try:
+        with open(data_dir / "context.json") as f:
+            context = json.load(f)
+    except FileNotFoundError:
+        context = {}
+    return produtos, sku_map, aliases, exemplos
+
+
+def _build_catalogo(candidatos: list, sku_map: dict) -> str:
+    return "\n".join(f"- {p} (REF: {sku_map.get(p, 'N/D')})" for p in candidatos)
+
+
+
+def _match_produto(nome_ai: str, produtos: list) -> tuple[str, float] | None:
+    for p in produtos:
+        if p.lower() == nome_ai.lower():
+            return p, 1.0
+    result = process.extractOne(nome_ai, produtos, scorer=fuzz.token_set_ratio)
+    if result and result[1] >= 70:
+        return result[0], result[1] / 100.0
+    return None
+
+
+def _parse_json(texto: str) -> list:
+    # Tenta diretamente primeiro
+    try:
+        return json.loads(texto.strip())
+    except json.JSONDecodeError:
+        pass
+    # Fallback: extrai o array do meio do texto (guloso para apanhar arrays grandes)
+    match = re.search(r"\[.*\]", texto, re.DOTALL)
+    if not match:
+        return []
+    try:
+        return json.loads(match.group())
+    except json.JSONDecodeError:
+        return []
+
+
+_SINONIMOS = {"direita": "reta", "diretas": "retas", "direto": "reto", "moon": "meia lua", "moons": "meia lua"}
+
+def _normalizar_linha(linha: str) -> str:
+    for orig, sub in _SINONIMOS.items():
+        linha = re.sub(rf'\b{orig}\b', sub, linha, flags=re.IGNORECASE)
+    return linha
+
+
+def _linhas_com_indices(texto: str) -> list[tuple[int, str]]:
+    """
+    Devolve (numero_original, texto_da_linha).
+
+    O servidor pode enviar batches já numerados com o índice global ("23: texto").
+    Preservar esse número evita que filtros de contexto, como "Cores novas",
+    façam a resposta da AI ficar desalinhada com a tabela final.
+    """
+    linhas = []
+    for fallback_idx, raw in enumerate(texto.splitlines(), 1):
+        linha = raw.strip()
+        if not linha:
+            continue
+        m = re.match(r"^(\d+)\s*[:.)-]\s+(.+)$", linha)
+        if m:
+            linhas.append((int(m.group(1)), m.group(2).strip()))
+        else:
+            linhas.append((fallback_idx, linha))
+    return linhas
+
+
+def _linha_so_contexto(linha: str) -> bool:
+    lower = linha.lower().strip()
+    lower_sem_qtd = re.sub(r"\b\d+\b", "", lower)
+    lower_sem_qtd = re.sub(r"\b(?:unidades?|un|pcs?|cada)\b", "", lower_sem_qtd).strip()
+    return (
+        lower in {"de cada", "verniz normal", "verniz gel"}
+        or lower.startswith(("bom dia", "boa tarde", "boa noite"))
+        or lower.startswith(("encomenda ", "pedido "))
+        or "cores novas" in lower
+        or lower_sem_qtd in {"cores novas", "verniz normal", "verniz gel"}
+    )
+
+
+def _candidatos_por_linha(linha: str, produtos: list, limit: int = 20) -> list:
+    """Seleciona os melhores candidatos para uma linha de texto."""
+    linha_norm = _normalizar_linha(linha)
+    top = process.extract(linha_norm, produtos, scorer=fuzz.token_set_ratio, limit=limit)
+    return [r[0] for r in top] if top else []
+
+
+def _extrair_texto_imagem(image_path: Path, client) -> str:
+    """OCR puro: Claude transcreve o texto visível na imagem."""
+    ext  = image_path.suffix.lower().lstrip(".")
+    mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png"}.get(ext, "image/jpeg")
+    with open(image_path, "rb") as f:
+        img_b64 = base64.b64encode(f.read()).decode()
+
+    try:
+        r = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=512,
+            messages=[{"role": "user", "content": [
+                {
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": mime, "data": img_b64}
+                },
+                {
+                    "type": "text",
+                    "text": (
+                        "Transcreve APENAS o texto visível nesta imagem, linha por linha.\n"
+                        "Não interpretes nem traduz — copia exatamente o que está escrito.\n"
+                        "Inclui números e quantidades tal como aparecem."
+                    )
+                }
+            ]}]
+        )
+        return r.content[0].text.strip()
+    except Exception as e:
+        print(f"[AI OCR] erro: {e}")
+        return ""
+
+
+def _construir_base_rag(exemplos: list, aliases: dict) -> list[dict]:
+    """Constrói a base de conhecimento: todos os pares escrito→produto."""
+    base = []
+    for escrito, produto in (aliases or {}).items():
+        base.append({"escrito": escrito, "produto": produto})
+    for e in exemplos:
+        escrito = e.get("escrito", "")
+        if "produtos" in e:
+            produto = ", ".join(e["produtos"])
+        else:
+            produto = e.get("produto", "")
+        if escrito and produto:
+            base.append({"escrito": escrito, "produto": produto})
+    return base
+
+
+def _recuperar_exemplos(texto: str, base_rag: list[dict], top_k: int = 12) -> str:
+    """RAG: recupera os exemplos mais relevantes para o texto atual."""
+    if not base_rag:
+        return ""
+    scored = sorted(
+        base_rag,
+        key=lambda e: fuzz.partial_ratio(e["escrito"].lower(), texto.lower()),
+        reverse=True
+    )
+    relevantes = scored[:top_k]
+    lines = [f'  "{e["escrito"]}" → {e["produto"]}' for e in relevantes]
+    return "\nExemplos de correspondências anteriores (mais relevantes para este pedido):\n" + "\n".join(lines) + "\n"
+
+
+def processar_imagem(image_path: Path, produtos: list, sku_map: dict, aliases: dict, client, exemplos: list = None) -> tuple[list, str]:
+    texto = _extrair_texto_imagem(image_path, client)
+    if not texto:
+        return [], ""
+    print(f"[AI OCR] texto extraído: {texto[:200]}")
+    return processar_texto(texto, produtos, sku_map, aliases, client, exemplos or []), texto
+
+
+def processar_texto(texto: str, produtos: list, sku_map: dict, aliases: dict, client, exemplos: list = None) -> list:
+    """
+    Para cada linha, seleciona candidatos com rapidfuzz.
+    Envia texto + candidatos ao Claude para matching final.
+    """
+    linhas_indexadas = _linhas_com_indices(texto)
+    if not linhas_indexadas:
+        return []
+
+    # Filtrar linhas com termos ignorados (alias com valor "")
+    _ignorar = {k for k, v in (aliases or {}).items() if v == ""}
+    linhas_indexadas = [
+        (idx, linha)
+        for idx, linha in linhas_indexadas
+        if not _linha_so_contexto(linha) and not any(t in linha.lower() for t in _ignorar)
+    ]
+    if not linhas_indexadas:
+        return []
+    linhas = [linha for _idx, linha in linhas_indexadas]
+
+    # Candidatos por linha (linha a linha evita diluição de score)
+    candidatos_score: dict[str, float] = {}
+    for linha in linhas:
+        linha_norm = _normalizar_linha(linha)
+        for produto, score, *_ in process.extract(linha_norm, produtos, scorer=fuzz.token_set_ratio, limit=20):
+            candidatos_score[produto] = max(candidatos_score.get(produto, 0), score)
+        # Se "de cada", garante que TODAS as variantes do padrão entram no catálogo
+        linha_norm = _normalizar_linha(linha.lower())
+        if "de cada" in linha_norm:
+            prefixo = re.sub(r'\b\d+\b', '', linha_norm.split("de cada")[0]).strip()
+            top_todos = process.extract(prefixo, produtos, scorer=fuzz.token_set_ratio, limit=10)
+            for produto, score, *_ in top_todos:
+                if score >= 70:
+                    candidatos_score[produto] = max(candidatos_score.get(produto, 0), score)
+
+    # Aliases diretos têm sempre prioridade — garante que entram no catálogo
+    if aliases:
+        texto_lower = texto.lower()
+        for alias, produto in aliases.items():
+            if alias.lower() in texto_lower and produto in produtos:
+                candidatos_score[produto] = max(candidatos_score.get(produto, 0), 100)
+
+    cap = max(60, min(len(linhas) * 8, 180))
+    candidatos = [
+        produto for produto, _score in sorted(candidatos_score.items(), key=lambda item: item[1], reverse=True)
+    ][:cap]
+    catalogo    = _build_catalogo(candidatos, sku_map)
+    base_rag    = _construir_base_rag(exemplos or [], aliases)
+    exemplos_txt = _recuperar_exemplos(texto, base_rag)
+
+    linhas_numeradas = "\n".join(f"{idx}: {linha}" for idx, linha in linhas_indexadas)
+    prompt = (
+        f"Catálogo de produtos de vernizes/unhas:\n{catalogo}\n"
+        f"{exemplos_txt}\n"
+        f"Mensagem de encomenda (com número de linha):\n{linhas_numeradas}\n\n"
+        "Identifica TODOS os produtos mencionados e as suas quantidades.\n"
+        "Usa o nome EXATO do catálogo acima — não inventes nomes.\n"
+        "Se um produto não estiver no catálogo, ignora-o.\n"
+        "IMPORTANTE: Linhas como 'Verniz normal', 'Cores novas ...' e 'De cada' isolado são contexto/instruções, não produtos.\n"
+        "IMPORTANTE: Se a mensagem disser 'X de cada' (ex: 'limas retas 1 de cada'), "
+        "lista TODOS os produtos do catálogo que correspondam a X, cada um com a quantidade indicada.\n"
+        "IMPORTANTE: 'direita'/'diretas' = 'reta'/'retas' no contexto de limas.\n"
+        'Responde APENAS com JSON válido (sem texto antes ou depois):\n'
+        '[{"produto": "nome exato do catálogo", "quantidade": número, "linha": número_da_linha_de_onde_veio}, ...]\n'
+        "O campo \"linha\" é o número que aparece no início da linha da mensagem onde identificaste o produto. "
+        "Se vier de várias linhas, usa a mais relevante. Se não conseguires determinar, omite o campo.\n"
+        "Se não houver produtos, responde []."
+    )
+
+    try:
+        r = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=max(1024, len(linhas) * 80),
+            messages=[{"role": "user", "content": prompt}]
+        )
+        raw = r.content[0].text
+        print(f"[AI texto] resposta: {raw[:300]}")
+        items = _parse_json(raw)
+    except Exception as e:
+        print(f"[AI texto] erro: {e}")
+        raise RuntimeError(f"Erro ao chamar Claude: {e}") from e
+
+    resultados = []
+    for item in items:
+        match = _match_produto(item.get("produto", ""), produtos)
+        if match:
+            produto_real, score = match
+            linha_idx = item.get("linha")
+            linha_idx = int(linha_idx) if linha_idx is not None else None
+            resultados.append((produto_real, score, int(item.get("quantidade", 1)), linha_idx))
+    return resultados

@@ -1,10 +1,10 @@
 from pathlib import Path
+import sys
 import json
 import numpy as np
 import easyocr
 from sentence_transformers import SentenceTransformer
 import re
-import math
 from rapidfuzz import fuzz
 import openpyxl
 
@@ -12,19 +12,60 @@ from utils import load_pickle, cosine_similarity, normalizar_unidades, remover_a
 from parser import quantidade_para_produto
 
 # =========================
+# Claude AI (opcional)
+# =========================
+_ai_client = None
+
+def init_ai_client(api_key: str):
+    global _ai_client
+    import anthropic
+    _ai_client = anthropic.Anthropic(api_key=api_key)
+
+def _ai_refine_match(trecho: str, candidatos_emb: list) -> tuple | None:
+    """Pede ao Claude para confirmar o melhor produto entre os candidatos do embedding."""
+    if _ai_client is None or not candidatos_emb:
+        return None
+    nomes = [p for p, _ in candidatos_emb[:10]]
+    lista = "\n".join(f"- {n}" for n in nomes)
+    prompt = (
+        f"Lista de produtos de verniz/unhas:\n{lista}\n\n"
+        f'Qual produto corresponde melhor a "{trecho}"?\n'
+        f"Responde APENAS com o nome exato da lista, ou \"nenhum\"."
+    )
+    try:
+        r = _ai_client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=80,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        resposta = r.content[0].text.strip()
+        for nome in nomes:
+            if nome.lower() in resposta.lower() or fuzz.ratio(resposta.lower(), nome.lower()) > 80:
+                return (nome, 0.82, 0.0, 0.82)
+    except Exception as e:
+        print(f"[AI] erro: {e}")
+    return None
+
+# =========================
 # PATHS
 # =========================
-BASE_DIR = Path(__file__).resolve().parent.parent
-DATA_DIR = BASE_DIR / "data"
-INPUT_DIR = BASE_DIR / "input"
-OUTPUT_DIR = BASE_DIR / "output"
-OUTPUT_DIR.mkdir(exist_ok=True)
+if getattr(sys, "frozen", False):
+    _BUNDLE   = Path(sys._MEIPASS)
+    _USER_DIR = Path.home() / "WhatsAppExcel"
+else:
+    _BUNDLE   = Path(__file__).resolve().parent.parent
+    _USER_DIR = _BUNDLE
+
+DATA_DIR   = _BUNDLE   / "data"
+INPUT_DIR  = _USER_DIR / "input"
+OUTPUT_DIR = _USER_DIR / "output"
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # =========================
 # MODELOS
 # =========================
 reader = easyocr.Reader(['pt'])
-_MODEL_FINETUNED = BASE_DIR / "data" / "model_finetuned"
+_MODEL_FINETUNED = _BUNDLE / "data" / "model_finetuned"
 model = SentenceTransformer(str(_MODEL_FINETUNED) if _MODEL_FINETUNED.exists() else "all-MiniLM-L6-v2")
 
 # =========================
@@ -69,7 +110,11 @@ def load_produtos():
     embeddings = np.load(DATA_DIR / "emb_prod.npy")
     sku_map_path = DATA_DIR / "sku_map.pkl"
     sku_map = load_pickle(sku_map_path) if sku_map_path.exists() else {}
-    return produtos, embeddings, sku_map
+    # Pré-computar uma vez — evita recalcular a cada linha no server
+    _cache_freq_palavras = calcular_freq_palavras(produtos, STOPWORDS)
+    _cache_palavras_unicas = calcular_palavras_unicas(produtos)
+    _cache_aliases = load_aliases()
+    return produtos, embeddings, sku_map, _cache_freq_palavras, _cache_palavras_unicas, _cache_aliases
 
 def load_aliases() -> dict[str, str]:
     """
@@ -89,6 +134,40 @@ def load_aliases() -> dict[str, str]:
 # =========================
 # OCR
 # =========================
+def _claude_extrair_linhas(imagem_path):
+    """OCR via Claude — usa quando _ai_client está disponível."""
+    import base64
+    ext  = Path(imagem_path).suffix.lower().lstrip(".")
+    mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png"}.get(ext, "image/jpeg")
+    with open(imagem_path, "rb") as f:
+        img_b64 = base64.b64encode(f.read()).decode()
+    try:
+        r = _ai_client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=512,
+            messages=[{"role": "user", "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": mime, "data": img_b64}},
+                {"type": "text", "text": (
+                    "Transcreve APENAS o texto visível nesta imagem, linha por linha.\n"
+                    "Não interpretes — copia exatamente o que está escrito."
+                )}
+            ]}]
+        )
+        texto = r.content[0].text.strip()
+    except Exception as e:
+        print(f"[Claude OCR] erro: {e}")
+        return None  # fallback para EasyOCR
+    linhas = []
+    for linha in texto.splitlines():
+        linha = linha.lower().strip()
+        linha = remover_acentos(linha)
+        linha = re.sub(r"[^\w\s]", "", linha).strip()
+        linha = normalizar_unidades(linha)
+        if linha:
+            linhas.append(linha)
+    return linhas
+
+
 def extrair_linhas(imagem_path):
     result = reader.readtext(str(imagem_path))
     result.sort(key=lambda r: r[0][0][1])
@@ -251,14 +330,19 @@ def encontrar_produtos_ia(trecho, produtos, emb_prod):
 
 def encontrar_produtos_levenshtein(trecho, produtos, freq_palavras=None):
     palavras_trecho = set(trecho.split())
+
+    # Pré-filtro rápido: top-30 candidatos com token_set_ratio (C nativo, muito rápido)
+    # Evita correr o matching detalhado contra todos os 1048 produtos
+    from rapidfuzz import process as rp
+    pre = rp.extract(trecho, produtos, scorer=fuzz.token_set_ratio, limit=30)
+    candidatos = [r[0] for r in pre]
+
     scores = []
-    for p in produtos:
+    for p in candidatos:
         palavras_produto = set(p.lower().split())
         s_set = fuzz.token_set_ratio(trecho, p.lower()) / 100
-        # Comparação sem espaços: apanha palavras concatenadas (ex: "noblue" ≡ "no blue")
         s_set = max(s_set, fuzz.ratio(trecho.replace(" ", ""), p.lower().replace(" ", "")) / 100)
 
-        # Parear palavras com fuzzy matching para não penalizar typos (ex: tammy↔tawny)
         matched_t, matched_p = set(), set()
         for w_t in palavras_trecho:
             if w_t in palavras_produto:
@@ -272,13 +356,10 @@ def encontrar_produtos_levenshtein(trecho, produtos, freq_palavras=None):
             if best_r >= 58:
                 matched_t.add(w_t); matched_p.add(best_p)
 
-        # Penalizar apenas palavras verdadeiramente sem par
-        # (excluir stopwords e unidades — o utilizador raramente as escreve)
         extra_produto = len((palavras_produto - matched_p) - STOPWORDS - UNIDADES) * 0.06
         extra_trecho = 0.0
         for w in palavras_trecho - matched_t:
             freq = freq_palavras.get(w, 0) if freq_palavras else 0
-            # palavras comuns penalizam menos (ex: "maria" em muitos produtos)
             especificidade = min(1.0, 1.0 / max(1, freq))
             extra_trecho += 0.10 * especificidade
 
@@ -303,9 +384,14 @@ def _match_trecho_best(
         return None
 
     candidatos = {}
-    for p, s in encontrar_produtos_ia(trecho, produtos, emb_prod)[:3]:
-        candidatos[p] = {"emb": s, "lev": 0}
-    for p, s in encontrar_produtos_levenshtein(trecho, produtos, freq_palavras)[:3]:
+    # Fuzzy primeiro (rápido) — se score muito alto, salta o sentence transformer
+    lev_top = encontrar_produtos_levenshtein(trecho, produtos, freq_palavras)[:3]
+    best_lev = lev_top[0][1] if lev_top else 0
+    usar_emb = 0.60 <= best_lev <= 0.96  # só usa embedding na zona de incerteza
+    if usar_emb:
+        for p, s in encontrar_produtos_ia(trecho, produtos, emb_prod)[:3]:
+            candidatos[p] = {"emb": s, "lev": 0}
+    for p, s in lev_top:
         if p not in candidatos:
             candidatos[p] = {"emb": 0, "lev": s}
         else:
@@ -373,6 +459,13 @@ def _match_trecho_best(
         if score > melhor_s:
             melhor_s, melhor_p, melhor_emb, melhor_lev = score, produto, s_emb, s_lev
 
+    # Complemento IA: só quando não há match nenhum (evita 100+ chamadas API por pedido)
+    if melhor_p is None and _ai_client is not None:
+        candidatos_emb = encontrar_produtos_ia(trecho, produtos, emb_prod)[:10]
+        ai = _ai_refine_match(trecho, candidatos_emb)
+        if ai:
+            melhor_p, melhor_s, melhor_emb, melhor_lev = ai
+
     return (melhor_p, melhor_s, melhor_emb, melhor_lev) if melhor_p else None
 
 _LEADING_QTY = re.compile(r"^\d+\s+")
@@ -400,7 +493,7 @@ def processar_linha(
     i = 0
 
     while i < n:
-        if consumed[i] or palavras[i] in STOPWORDS:
+        if consumed[i] or palavras[i] in STOPWORDS or palavras[i].isdigit():
             i += 1
             continue
 
@@ -539,6 +632,40 @@ UNIDADES        = {"ml", "gr", "grs", "g", "kg", "cm", "mm", "l", "lt", "lts",
 KEYWORDS_BOOST  = ["primer", "bailarina", "transparente"]
 PALAVRAS_GENERICAS = {"gel", "tips", "builder"}
 
+# Sinónimos aplicados antes do matching (informal → nome no catálogo)
+SINONIMOS = {
+    "direita": "reta",
+    "diretas": "retas",
+    "direto":  "reto",
+    "moon":    "meia lua",
+    "moons":   "meia lua",
+}
+
+_DE_CADA = re.compile(
+    r'^(?:(\d+)\s+)?(.+?)\s+(?:\d+\s+)?(?:pack\s+)?de\s+cada$',
+    re.IGNORECASE
+)
+
+def _aplicar_sinonimos(texto: str) -> str:
+    for original, substituto in SINONIMOS.items():
+        texto = re.sub(rf'\b{original}\b', substituto, texto)
+    return texto
+
+def _expandir_de_cada(linha: str, produtos: list, qty_override: int = 1) -> list[tuple[str, float, int]] | None:
+    """Se a linha tiver padrão 'X de cada', devolve todos os produtos que correspondem a X."""
+    m = _DE_CADA.match(linha.strip())
+    if not m:
+        return None
+    qty = int(m.group(1)) if m.group(1) else qty_override
+    trecho = _aplicar_sinonimos(m.group(2).strip())
+    resultados = []
+    for p in produtos:
+        score = fuzz.token_set_ratio(trecho, p.lower()) / 100
+        if score >= 0.75:
+            resultados.append((p, score, qty))
+    resultados.sort(key=lambda x: -x[1])
+    return resultados if resultados else None
+
 
 # =========================
 # FUSÃO DE LINHAS CURTAS
@@ -575,16 +702,17 @@ def _fundir_linhas_curtas(linhas: list[str], produtos, emb_prod, freq_palavras, 
 # =========================
 # PROCESSAR IMAGEM (silent — sem prints, para usar no app)
 # =========================
-def processar_imagem(img_path: Path, produtos: list, emb_prod) -> list[tuple[str, float, int]]:
+def processar_imagem(img_path: Path, produtos: list, emb_prod,
+                     freq_palavras=None, palavras_unicas=None) -> list[tuple[str, float, int]]:
     """
     Processa uma imagem e devolve [(produto, score, quantidade), ...].
     Usa greedy expansion com word consumption por linha (ver processar_linha).
     Sem output no terminal — para uso no app.
     """
     aliases        = load_aliases()
-    freq_palavras  = calcular_freq_palavras(produtos, STOPWORDS)
-    palavras_unicas = calcular_palavras_unicas(produtos)
-    linhas         = extrair_linhas(img_path)
+    freq_palavras  = freq_palavras  or calcular_freq_palavras(produtos, STOPWORDS)
+    palavras_unicas = palavras_unicas or calcular_palavras_unicas(produtos)
+    linhas = (_claude_extrair_linhas(img_path) if _ai_client else None) or extrair_linhas(img_path)
     linhas         = _fundir_linhas_curtas(linhas, produtos, emb_prod, freq_palavras, aliases=aliases, palavras_unicas=palavras_unicas)
 
     ocr_tokens, ocr_tokens_num = set(), set()
@@ -624,14 +752,15 @@ def processar_imagem(img_path: Path, produtos: list, emb_prod) -> list[tuple[str
     resultado = [(p, s, t) for p, s, t in resultado if p not in subsumed]
     resultado.sort(key=lambda x: ordem.get(x[0], 0))
 
-    return [(p, s, quantidade_para_produto(t, linhas, produto_nome=p))
+    return [(p, s, quantidade_para_produto(t, linhas, produto_nome=p), t)
             for p, s, t in resultado]
 
 
 # =========================
 # PROCESSAR TEXTO (sem OCR — texto colado directamente)
 # =========================
-def processar_texto(texto: str, produtos: list, emb_prod) -> list[tuple[str, float, int]]:
+def processar_texto(texto: str, produtos: list, emb_prod,
+                    freq_palavras=None, palavras_unicas=None) -> list[tuple[str, float, int]]:
     """
     Processa texto colado (sem OCR) e devolve [(produto, score, quantidade), ...].
     """
@@ -642,17 +771,31 @@ def processar_texto(texto: str, produtos: list, emb_prod) -> list[tuple[str, flo
         linha = remover_acentos(linha)
         linha = re.sub(r"[^\w\s]", "", linha).strip()
         linha = normalizar_unidades(linha)
+        linha = _aplicar_sinonimos(linha)
         if linha:
             linhas.append(linha)
 
     aliases         = load_aliases()
-    freq_palavras   = calcular_freq_palavras(produtos, STOPWORDS)
-    palavras_unicas = calcular_palavras_unicas(produtos)
+    freq_palavras   = freq_palavras   or calcular_freq_palavras(produtos, STOPWORDS)
+    palavras_unicas = palavras_unicas or calcular_palavras_unicas(produtos)
     linhas          = _fundir_linhas_curtas(linhas, produtos, emb_prod, freq_palavras, aliases=aliases, palavras_unicas=palavras_unicas)
 
     melhor: dict[str, tuple[float, str]] = {}
     ordem:  dict[str, int] = {}
+    _ignorar = {k for k, v in (aliases or {}).items() if v == ""}
     for i, linha in enumerate(linhas):
+        # Termos explicitamente ignorados (alias com valor "") → linha vazia
+        if any(term in linha for term in _ignorar):
+            continue
+        # Padrão "X de cada" → expande para todas as variantes
+        de_cada = _expandir_de_cada(linha, produtos)
+        if de_cada:
+            for produto, score, _qty in de_cada:
+                if produto not in melhor or score > melhor[produto][0]:
+                    melhor[produto] = (score, linha)
+                if produto not in ordem:
+                    ordem[produto] = i
+            continue
         for produto, score, trecho, *_ in processar_linha(linha, produtos, emb_prod, freq_palavras, aliases=aliases, palavras_unicas=palavras_unicas):
             if produto not in melhor or score > melhor[produto][0]:
                 melhor[produto] = (score, trecho)
@@ -668,7 +811,7 @@ def processar_texto(texto: str, produtos: list, emb_prod) -> list[tuple[str, flo
     resultado = [(p, s, t) for p, s, t in resultado if p not in subsumed]
     resultado.sort(key=lambda x: ordem.get(x[0], 0))
 
-    return [(p, s, quantidade_para_produto(t, linhas, produto_nome=p))
+    return [(p, s, quantidade_para_produto(t, linhas, produto_nome=p), t)
             for p, s, t in resultado]
 
 

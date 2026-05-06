@@ -1,13 +1,15 @@
-name: Build Windows EXE
+name: Build Windows Installer
 
 on:
   push:
-    tags: ["v*"]        # git tag v1.0 && git push --tags
-  workflow_dispatch:    # ou manualmente: GitHub → Actions → Run workflow
+    tags: ["v*"]
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: windows-latest
+    env:
+      PYTHONUTF8: "1"
 
     steps:
       - uses: actions/checkout@v4
@@ -22,15 +24,16 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
-      - name: Pré-descarregar modelos EasyOCR (ficam embutidos no exe)
-        run: python -c "import easyocr; easyocr.Reader(['pt'], gpu=False)"
+      - name: Build exe
+        run: pyinstaller build/app.spec
 
-      - name: Build
-        run: pyinstaller app.spec
+      - name: Criar instalador (Inno Setup)
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" build\installer.iss
 
-      - name: Upload WhatsAppExcel.exe
+      - name: Upload instalador
         uses: actions/upload-artifact@v4
         with:
-          name: WhatsAppExcel-windows
-          path: dist/WhatsAppExcel.exe
+          name: WhatsAppExcel-Instalador
+          path: dist\WhatsAppExcel_Instalador.exe
           retention-days: 30

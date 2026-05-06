@@ -1,3 +1,6 @@
+flask
+waitress
+openai
 easyocr==1.7.2
 sentence-transformers==5.4.0
 customtkinter==5.2.2
@@ -9,3 +12,4 @@ Pillow
 requests
 beautifulsoup4
 python-dotenv
+anthropic
