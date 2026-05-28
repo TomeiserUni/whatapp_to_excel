@@ -647,28 +647,60 @@ def processar():
         try:
             if IS_CLOUD:
                 rows, ocr_text = pl["pl"].processar_imagem(tmp_path, pl["produtos"], pl["sku_map"], pl["aliases"], pl["ai_client"], pl.get("exemplos", []))
-                texto_origem_img = ocr_text[:300] if ocr_text else ""
+                linhas_img = [l for l in _preprocessar_texto(ocr_text or "") if l.strip()]
+
+                rows_img: list[dict] = []
+                for row in (rows or []):
+                    produto = row[0]
+                    score   = row[1]
+                    qty     = row[2]
+                    ai_idx  = row[3] if len(row) > 3 else None
+                    if ai_idx and 1 <= ai_idx <= len(linhas_img):
+                        linha_idx  = ai_idx
+                        texto_orig = f"linha {ai_idx}: {linhas_img[ai_idx - 1]}"
+                    else:
+                        texto_orig = (ocr_text or "")[:300]
+                        linha_idx  = None
+                    rows_img.append({
+                        "ficheiro":     f.filename,
+                        "produto":      produto,
+                        "qtd":          qty,
+                        "score":        round(score, 3),
+                        "ref":          pl["sku_map"].get(produto, ""),
+                        "texto_origem": texto_orig,
+                        "_linha_idx":   linha_idx,
+                    })
+
+                # Regras PLN também sobre o OCR — alinhadas com /processar_texto
+                aliases_img = pl.get("aliases", {})
+                regras: list[dict] = []
+                regras.extend(_expandir_aliases_diretos(linhas_img, aliases_img, pl["sku_map"]))
+                regras.extend(_expandir_identificadores_unicos(linhas_img, pl["produtos"], pl["sku_map"]))
+                regras.extend(_expandir_lista_variantes_numeradas(linhas_img, pl["produtos"], pl["sku_map"]))
+                regras.extend(_expandir_regras_de_cada(linhas_img, pl["sku_map"]))
+                for r in regras:
+                    r["ficheiro"] = f.filename
+
+                combinado = _dedupe_resultados_por_linha_ou_de_cada(rows_img + regras, linhas_img)
+                if combinado:
+                    resultados.extend(combinado)
+                else:
+                    resultados.append({"ficheiro": f.filename, "produto": "", "qtd": "", "score": 0, "ref": "", "texto_origem": ""})
             else:
                 rows = pl["pl"].processar_imagem(tmp_path, pl["produtos"], pl["emb_prod"],
                                                   pl.get("freq_palavras"), pl.get("palavras_unicas"))
-                texto_origem_img = None  # cada row traz o seu trecho
-            if rows:
-                for row in rows:
-                    if IS_CLOUD:
-                        produto, score, qty = row
-                        trecho = texto_origem_img
-                    else:
-                        produto, score, qty, trecho = row
-                    resultados.append({
-                        "ficheiro":      f.filename,
-                        "produto":       produto,
-                        "qtd":           qty,
-                        "score":         round(score, 3),
-                        "ref":           pl["sku_map"].get(produto, ""),
-                        "texto_origem":  trecho or "",
-                    })
-            else:
-                resultados.append({"ficheiro": f.filename, "produto": "", "qtd": "", "score": 0, "ref": "", "texto_origem": ""})
+                if rows:
+                    for produto, score, qty, trecho in rows:
+                        resultados.append({
+                            "ficheiro":      f.filename,
+                            "produto":       produto,
+                            "qtd":           qty,
+                            "score":         round(score, 3),
+                            "ref":           pl["sku_map"].get(produto, ""),
+                            "texto_origem":  trecho or "",
+                        })
+                else:
+                    resultados.append({"ficheiro": f.filename, "produto": "", "qtd": "", "score": 0, "ref": "", "texto_origem": ""})
         finally:
             tmp_path.unlink(missing_ok=True)
 
