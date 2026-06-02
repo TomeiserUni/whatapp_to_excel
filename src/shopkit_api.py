@@ -1,17 +1,4 @@
-"""
-Sincroniza o catálogo a partir do API Shopkit.
 
-Substitui o crawler HTML (notebooks/crawler_sku.py) por chamadas autenticadas
-ao endpoint GET /v1/product. Produz:
-
-  data/prod.pkl       — lista de nomes normalizados (compat. com pipeline)
-  data/sku_map.pkl    — dict nome→referência
-  data/prod_meta.json — dict nome→{descricao, categorias} para enriquecer o RAG
-  data/emb_prod.npy   — embeddings re-gerados para o novo catálogo
-
-Correr manualmente:
-    python src/shopkit_api.py
-"""
 from __future__ import annotations
 
 import json

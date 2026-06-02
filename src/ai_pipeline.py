@@ -238,17 +238,46 @@ def processar_texto(texto: str, produtos: list, sku_map: dict, aliases: dict, cl
         f"Catálogo de produtos de vernizes/unhas:\n{catalogo}\n"
         f"{exemplos_txt}\n"
         f"Mensagem de encomenda (com número de linha):\n{linhas_numeradas}\n\n"
-        "Identifica TODOS os produtos mencionados e as suas quantidades.\n"
-        "Usa o nome EXATO do catálogo acima — não inventes nomes.\n"
-        "Se um produto não estiver no catálogo, ignora-o.\n"
-        "IMPORTANTE: Linhas como 'Verniz normal', 'Cores novas ...' e 'De cada' isolado são contexto/instruções, não produtos.\n"
-        "IMPORTANTE: Se a mensagem disser 'X de cada' (ex: 'limas retas 1 de cada'), "
-        "lista TODOS os produtos do catálogo que correspondam a X, cada um com a quantidade indicada.\n"
-        "IMPORTANTE: 'direita'/'diretas' = 'reta'/'retas' no contexto de limas.\n"
+        "Identifica os produtos mencionados e as suas quantidades.\n"
+        "\n"
+        "REGRAS OBRIGATÓRIAS:\n"
+        "1. Usa o nome EXATO do catálogo acima — não inventes nomes.\n"
+        "2. Cada palavra distintiva do produto escolhido (nome próprio, cor específica, "
+        "número de variante) TEM de aparecer na linha de onde dizes que vem — exata OU "
+        "como typo razoável OU como abreviação. Categorias genéricas como 'verniz gel', "
+        "'top coat', 'builder' sozinhas NÃO chegam para escolher uma variante.\n"
+        "3. Uma linha normalmente corresponde a UM produto. NUNCA atribuas vários produtos "
+        "à mesma linha, exceto se essa linha tiver o padrão 'X de cada' OU listar "
+        "explicitamente várias cores/variantes separadas por vírgula.\n"
+        "4. Se uma linha menciona só uma categoria genérica (ex: 'verniz gel') sem cor/nome "
+        "específico, ignora-a.\n"
+        "5. Se um produto não estiver no catálogo, ignora-o.\n"
+        "\n"
+        "TOLERÂNCIA A IMPERFEIÇÕES — quando o nome escrito não bate exato com o catálogo:\n"
+        "• Typos de uma ou duas letras: aceita se só houver UM candidato no catálogo "
+        "razoavelmente próximo. Ex: 'tammy natura' → 'tawny natura' (única opção parecida); "
+        "'princepezinho' → 'principezinho'; 'matte' → 'matte finish'. "
+        "Se houver dois candidatos próximos (ex: 'rosa' pode ser 'rosa pop' ou 'rosa sakura'), "
+        "NÃO escolhas — ignora.\n"
+        "• Ordem de palavras trocada: 'top coat like gel' = 'like gel top coat'. Aceita.\n"
+        "• Números aproximados (potência/volume): se o cliente pede um número que não existe "
+        "no catálogo MAS existe UM produto da mesma categoria com número próximo, devolve "
+        "esse. Ex: 'lâmpada LED 99W' → 'lâmpada 90W' (única que existe). "
+        "Se há vários números possíveis (30ml, 50ml, ambos existem), NÃO troques — devolve "
+        "o que o cliente pediu se existir, senão ignora.\n"
+        "• Palavras a mais/a menos: 'brigadeiro' = 'verniz gel brigadeiro natura' (abreviação).\n"
+        "\n"
+        "Linhas-contexto a ignorar: 'Verniz normal', 'Cores novas ...', 'De cada' isolado, "
+        "saudações ('bom dia'…), 'encomenda', 'pedido'.\n"
+        "Padrão 'X de cada' (ex: 'limas retas 1 de cada'): aí sim, lista TODOS os produtos "
+        "do catálogo que correspondam a X, cada um com a quantidade indicada.\n"
+        "Sinónimos: 'direita'/'diretas' = 'reta'/'retas' (limas).\n"
+        "\n"
         'Responde APENAS com JSON válido (sem texto antes ou depois):\n'
         '[{"produto": "nome exato do catálogo", "quantidade": número, "linha": número_da_linha_de_onde_veio}, ...]\n'
-        "O campo \"linha\" é o número que aparece no início da linha da mensagem onde identificaste o produto. "
-        "Se vier de várias linhas, usa a mais relevante. Se não conseguires determinar, omite o campo.\n"
+        'O campo "linha" é OBRIGATÓRIO e tem de corresponder à linha real onde o nome '
+        "específico do produto aparece. Se não consegues apontar uma linha concreta com "
+        "a palavra distintiva, não incluas o produto.\n"
         "Se não houver produtos, responde []."
     )
 
@@ -265,12 +294,95 @@ def processar_texto(texto: str, produtos: list, sku_map: dict, aliases: dict, cl
         print(f"[AI texto] erro: {e}")
         raise RuntimeError(f"Erro ao chamar Claude: {e}") from e
 
+    # Mapa idx_original → texto da linha, para validar atribuições
+    linha_por_idx = {idx: linha for idx, linha in linhas_indexadas}
+    genericas = _palavras_genericas(produtos)
+
     resultados = []
     for item in items:
         match = _match_produto(item.get("produto", ""), produtos)
-        if match:
-            produto_real, score = match
-            linha_idx = item.get("linha")
-            linha_idx = int(linha_idx) if linha_idx is not None else None
-            resultados.append((produto_real, score, int(item.get("quantidade", 1)), linha_idx))
+        if not match:
+            continue
+        produto_real, score = match
+        raw_idx = item.get("linha")
+        linha_idx = int(raw_idx) if raw_idx is not None else None
+
+        # Validação anti-alucinação: o nome distintivo tem de aparecer na linha apontada,
+        # excepto se a linha for um padrão "de cada" (que expande várias variantes).
+        if linha_idx is not None and linha_idx in linha_por_idx:
+            linha_texto = linha_por_idx[linha_idx]
+            if "de cada" not in linha_texto.lower():
+                if not _produto_referenciado_na_linha(produto_real, linha_texto, genericas):
+                    print(f"[AI] descartado (alucinação): {produto_real!r} → linha {linha_idx} {linha_texto!r}")
+                    continue
+
+        resultados.append((produto_real, score, int(item.get("quantidade", 1)), linha_idx))
     return resultados
+
+
+def _palavras_genericas(produtos: list[str]) -> set[str]:
+    """Tokens que aparecem em muitos produtos — não identificam variantes específicas."""
+    base = {
+        "verniz", "gel", "normal", "base", "top", "coat", "ml", "g", "gr",
+        "unidade", "unidades", "un", "pcs", "cada", "de", "da", "do", "com",
+        "para", "e", "natura", "pop", "kit", "para",
+    }
+    contagem: dict[str, int] = {}
+    for p in produtos:
+        for t in re.findall(r"\w+", p.lower()):
+            if len(t) >= 3 and not t.isdigit():
+                contagem[t] = contagem.get(t, 0) + 1
+    # Token genérico = aparece em >5% do catálogo
+    limite = max(3, int(len(produtos) * 0.05))
+    return base | {t for t, c in contagem.items() if c >= limite}
+
+
+def _produto_referenciado_na_linha(produto: str, linha: str, genericas: set[str]) -> bool:
+    """
+    True se pelo menos uma palavra distintiva do produto aparece na linha.
+    Tolerante a typos curtos (ex: tammy↔tawny, 99w↔90w) — confiando que a AI
+    aplicou as regras do prompt para escolher candidato único.
+    """
+    linha_norm = _normalizar_linha(linha).lower()
+    linha_tokens = set(re.findall(r"\w+", linha_norm))
+    if not linha_tokens:
+        return False
+
+    palavras_produto = re.findall(r"\w+", produto.lower())
+    distintivas_alfa = [t for t in palavras_produto if t.isalpha() and len(t) >= 3 and t not in genericas]
+    distintivas_num  = [t for t in palavras_produto if not t.isalpha() and any(c.isdigit() for c in t)]
+
+    if not distintivas_alfa and not distintivas_num:
+        return fuzz.token_set_ratio(produto.lower(), linha_norm) >= 80
+
+    # Palavras alfabéticas: match exato OU typo (≥65) OU substring (abreviação)
+    for d in distintivas_alfa:
+        if d in linha_tokens:
+            return True
+        for t in linha_tokens:
+            if not t.isalpha() or len(t) < 3:
+                continue
+            if fuzz.ratio(d, t) >= 65:
+                return True
+            # Abreviação curta (princip→principezinho): só se a token da linha
+            # for prefixo distintivo da palavra do produto, com ≥4 chars
+            if len(t) >= 4 and d.startswith(t):
+                return True
+
+    # Números: match exato OU número próximo na linha (potência/volume similar)
+    def _so_digitos(tok: str) -> int | None:
+        m = re.search(r"\d+", tok)
+        return int(m.group()) if m else None
+
+    for d in distintivas_num:
+        if d in linha_tokens:
+            return True
+        d_num = _so_digitos(d)
+        if d_num is None:
+            continue
+        for t in linha_tokens:
+            t_num = _so_digitos(t)
+            if t_num is not None and abs(d_num - t_num) <= max(10, d_num // 10):
+                return True
+
+    return False
