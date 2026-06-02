@@ -2,3 +2,4 @@ __pycache__
 .conda
 .vscode
 .env
+data/nao_reconhecidas.jsonl

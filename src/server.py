@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import re
 import secrets
@@ -7,6 +8,8 @@ import tempfile
 import threading
 import unicodedata
 import webbrowser
+from collections import Counter
+from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
 
@@ -30,6 +33,35 @@ sys.path.insert(0, str(_BUNDLE / "src"))
 OUTPUT_DIR = None if IS_CLOUD else _USER_DIR / "output"
 if OUTPUT_DIR:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+# Registo de linhas não-reconhecidas, para perceber a tendência dos erros
+# e priorizar que aliases criar a seguir.
+_LOG_NAO_RECONHECIDAS = _USER_DIR / "data" / "nao_reconhecidas.jsonl"
+
+
+def _normalizar_para_tendencia(linha: str) -> str:
+    """Linha sem quantidade/pontuação, minúsculas — agrupa variações do mesmo erro."""
+    s = re.sub(r"^\s*\d+\s*[-.)]?\s*", "", linha.lower())  # tira "4- " inicial
+    s = re.sub(r"[^\w\s]", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _registar_nao_reconhecida(linha: str) -> None:
+    """Acrescenta uma linha não-reconhecida ao log (JSONL). Falha em silêncio."""
+    chave = _normalizar_para_tendencia(linha)
+    if not chave or _linha_so_contexto(linha):
+        return
+    try:
+        _LOG_NAO_RECONHECIDAS.parent.mkdir(parents=True, exist_ok=True)
+        registo = {
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "linha": linha.strip(),
+            "chave": chave,
+        }
+        with open(_LOG_NAO_RECONHECIDAS, "a", encoding="utf-8") as f:
+            f.write(json.dumps(registo, ensure_ascii=False) + "\n")
+    except Exception:
+        pass  # registo é best-effort, nunca deve quebrar o processamento
 
 # ── Flask ─────────────────────────────────────────────────────────
 template_folder = str(_BUNDLE / "src" / "templates")
@@ -63,16 +95,23 @@ def _normalizar_token(texto: str) -> str:
     return texto.strip()
 
 
+_GENERICOS_SO_CONTEXTO = {
+    "cores novas", "verniz normal", "verniz gel", "verniz gel cateye",
+}
+
+
 def _linha_so_contexto(linha: str) -> bool:
     lower = linha.lower().strip()
     lower_sem_qtd = re.sub(r"\b\d+\b", "", lower)
-    lower_sem_qtd = re.sub(r"\b(?:unidades?|un|pcs?|cada)\b", "", lower_sem_qtd).strip()
+    lower_sem_qtd = re.sub(r"\b(?:unidades?|un|pcs?|cada)\b", "", lower_sem_qtd)
+    # remove pontuação/hífens soltos (ex: "4- verniz gel cateye" → "verniz gel cateye")
+    lower_sem_qtd = re.sub(r"[^\w\s]", " ", lower_sem_qtd)
+    lower_sem_qtd = re.sub(r"\s+", " ", lower_sem_qtd).strip()
     return (
-        lower in {"de cada", "verniz normal", "verniz gel"}
+        lower in {"de cada"} or lower_sem_qtd in _GENERICOS_SO_CONTEXTO
         or lower.startswith(("bom dia", "boa tarde", "boa noite"))
         or lower.startswith(("encomenda ", "pedido "))
         or "cores novas" in lower
-        or lower_sem_qtd in {"cores novas", "verniz normal", "verniz gel"}
     )
 
 
@@ -127,6 +166,7 @@ def _intercalar_erros_linhas(linhas: list[str], resultados: list[dict]) -> list[
             final.extend(rows)
         else:
             final.append(_erro_linha(idx, linha))
+            _registar_nao_reconhecida(linha)
     final.extend(sem_linha)
     return final
 
@@ -595,6 +635,39 @@ def status():
     return jsonify({"ready": _pipeline is not None})
 
 
+@app.route("/tendencias")
+@login_required
+def tendencias():
+    """Linhas não-reconhecidas mais frequentes — ajuda a priorizar que aliases criar."""
+    contagem: Counter = Counter()
+    exemplos: dict[str, str] = {}
+    total = 0
+    try:
+        with open(_LOG_NAO_RECONHECIDAS, encoding="utf-8") as f:
+            for linha_log in f:
+                linha_log = linha_log.strip()
+                if not linha_log:
+                    continue
+                try:
+                    reg = json.loads(linha_log)
+                except json.JSONDecodeError:
+                    continue
+                chave = reg.get("chave", "")
+                if not chave:
+                    continue
+                contagem[chave] += 1
+                total += 1
+                exemplos.setdefault(chave, reg.get("linha", chave))
+    except FileNotFoundError:
+        pass
+
+    top = [
+        {"chave": chave, "vezes": vezes, "exemplo": exemplos.get(chave, chave)}
+        for chave, vezes in contagem.most_common(100)
+    ]
+    return jsonify({"total": total, "distintas": len(contagem), "top": top})
+
+
 @app.route("/config", methods=["GET"])
 @login_required
 def get_config():
@@ -726,7 +799,8 @@ def processar_texto():
     use_ai    = bool(ai_pl and ai_client)
 
     if use_ai:
-        # Batches paralelos com Claude (cloud ou local com API key)
+        # Estratégia: regras PLN primeiro (determinísticas, score 1.0).
+        # AI só processa linhas que nenhuma regra cobriu — mais barato e sem alucinações em linhas já resolvidas.
         from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
         from rapidfuzz import fuzz as _rfuzz
 
@@ -734,46 +808,62 @@ def processar_texto():
         sku_t     = pl["ai_sku_map"]  if not IS_CLOUD else pl["sku_map"]
         aliases_t = pl["ai_aliases"]  if not IS_CLOUD else pl["aliases"]
         exemplos_t = pl.get("exemplos", [])
-
-        batch_size = _int_env("AI_BATCH_LINES", 60, minimum=10, maximum=120)
-        max_workers = _int_env("AI_MAX_WORKERS", 8, minimum=1, maximum=12)
-        batches = _chunks(linhas, batch_size)
-        print(f"[AI texto] {len(linhas)} linhas em {len(batches)} lote(s) de até {batch_size}.")
-
-        raw_rows: list[tuple] = []
-        batch_errors: list[str] = []
-        with ThreadPoolExecutor(max_workers=min(len(batches), max_workers)) as pool:
-            futs = {
-                pool.submit(
-                    ai_pl.processar_texto,
-                    "\n".join(b),
-                    prods_t, sku_t, aliases_t, ai_client, exemplos_t
-                ): b
-                for b in batches
-            }
-            for fut in _as_completed(futs):
-                b = futs[fut]
-                try:
-                    for row in (fut.result() or []):
-                        raw_rows.append((row, b))
-                except Exception as e:
-                    print(f"[batch] erro: {e}")
-                    batch_errors.append(str(e))
-
-        if batch_errors and len(batch_errors) == len(batches):
-            return jsonify({"error": "Erro ao processar com AI. Verifica a API key ou tenta novamente."}), 502
-
-        melhor: dict[str, tuple] = {}
-        for row, b in raw_rows:
-            p = row[0]
-            if p not in melhor or row[1] > melhor[p][0][1]:
-                melhor[p] = (row, b)
-
         sku_final = pl.get("ai_sku_map") or pl["sku_map"]
+
+        # 1) Regras PLN sobre todas as linhas
         resultados.extend(_expandir_aliases_diretos(linhas, aliases_t, sku_final))
         resultados.extend(_expandir_identificadores_unicos(linhas, prods_t, sku_final))
         resultados.extend(_expandir_lista_variantes_numeradas(linhas, prods_t, sku_final))
         resultados.extend(_expandir_regras_de_cada(linhas, sku_final))
+
+        linhas_cobertas = {r["_linha_idx"] for r in resultados if r.get("_linha_idx")}
+
+        # 2) Linhas que sobraram (e que não são puro contexto) vão à AI
+        linhas_para_ai = [
+            (idx, linha)
+            for idx, linha in enumerate(linhas, 1)
+            if idx not in linhas_cobertas and not _linha_so_contexto(linha)
+        ]
+        print(f"[PLN] {len(linhas_cobertas)}/{len(linhas)} linhas resolvidas por regras. "
+              f"{len(linhas_para_ai)} linhas para a AI.")
+
+        melhor: dict[str, tuple] = {}
+        if linhas_para_ai:
+            batch_size = _int_env("AI_BATCH_LINES", 60, minimum=10, maximum=120)
+            max_workers = _int_env("AI_MAX_WORKERS", 8, minimum=1, maximum=12)
+            # Cada batch mantém o índice global no formato "N: texto" (lido por _linhas_com_indices)
+            linhas_numeradas = [f"{idx}: {linha}" for idx, linha in linhas_para_ai]
+            batches = _chunks(linhas_numeradas, batch_size)
+            print(f"[AI texto] {len(linhas_para_ai)} linhas em {len(batches)} lote(s) de até {batch_size}.")
+
+            raw_rows: list[tuple] = []
+            batch_errors: list[str] = []
+            with ThreadPoolExecutor(max_workers=min(len(batches), max_workers)) as pool:
+                futs = {
+                    pool.submit(
+                        ai_pl.processar_texto,
+                        "\n".join(b),
+                        prods_t, sku_t, aliases_t, ai_client, exemplos_t
+                    ): b
+                    for b in batches
+                }
+                for fut in _as_completed(futs):
+                    b = futs[fut]
+                    try:
+                        for row in (fut.result() or []):
+                            raw_rows.append((row, b))
+                    except Exception as e:
+                        print(f"[batch] erro: {e}")
+                        batch_errors.append(str(e))
+
+            if batch_errors and len(batch_errors) == len(batches):
+                return jsonify({"error": "Erro ao processar com AI. Verifica a API key ou tenta novamente."}), 502
+
+            for row, b in raw_rows:
+                p = row[0]
+                if p not in melhor or row[1] > melhor[p][0][1]:
+                    melhor[p] = (row, b)
+
         if melhor:
             for p, (row, b) in melhor.items():
                 _, s, q = row[0], row[1], row[2]
@@ -794,29 +884,11 @@ def processar_texto():
                     "texto_origem": texto_orig,
                     "_linha_idx":   linha_idx,
                 })
+
+        if resultados:
             resultados = _intercalar_erros_linhas(linhas, _dedupe_resultados_por_linha_ou_de_cada(resultados, linhas))
         else:
-            if not IS_CLOUD and pl.get("emb_prod") is not None:
-                texto_proc = "\n".join(linhas)
-                rows = pl["pl"].processar_texto(texto_proc, pl["produtos"], pl["emb_prod"],
-                                                 pl.get("freq_palavras"), pl.get("palavras_unicas"))
-                for row in rows:
-                    p, s, q = row[0], row[1], row[2]
-                    trecho = row[3] if len(row) > 3 else ""
-                    resultados.append({
-                        "ficheiro":     "texto colado",
-                        "produto":      p,
-                        "qtd":          q,
-                        "score":        round(s, 3),
-                        "ref":          pl["sku_map"].get(p, ""),
-                        "texto_origem": _linha_origem(linhas, trecho),
-                        "_linha_idx":   _linha_idx(linhas, trecho),
-                    })
-                resultados = _intercalar_erros_linhas(linhas, _dedupe_resultados_por_linha_ou_de_cada(resultados, linhas))
-            elif resultados:
-                resultados = _intercalar_erros_linhas(linhas, _dedupe_resultados_por_linha_ou_de_cada(resultados, linhas))
-            if not resultados:
-                return jsonify(_intercalar_erros_linhas(linhas, []))
+            return jsonify(_intercalar_erros_linhas(linhas, []))
     else:
         # Sem API key: pipeline local ML (lento para ordens grandes)
         texto_proc = "\n".join(linhas)
@@ -903,7 +975,7 @@ def exportar():
 # ── Main ──────────────────────────────────────────────────────────
 if __name__ == "__main__":
     threading.Thread(target=_load_pipeline, daemon=True).start()
-    PORT = int(os.environ.get("PORT", 5000 if sys.platform == "win32" else 5001))
+    PORT = int(os.environ.get("PORT", 5000 if sys.platform == "win32" else 5002))
     HOST = "0.0.0.0"
     if not IS_CLOUD:
         threading.Timer(1.5, lambda: webbrowser.open(f"http://localhost:{PORT}")).start()
