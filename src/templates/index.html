@@ -27,21 +27,29 @@
   main { flex: 1; display: flex; gap: 16px; padding: 16px; max-width: 1200px; width: 100%; margin: 0 auto; }
 
   /* drop zone */
-  #drop-zone { border: 2px dashed #4fc3f7; border-radius: 12px; padding: 40px 20px; text-align: center; cursor: pointer; transition: background .2s, border-color .2s; background: #0f3460; min-width: 260px; }
+  #zona-imagem { display: flex; flex-direction: column; flex: 1; gap: 12px; }
+  #drop-zone { border: 2px dashed #4fc3f7; border-radius: 12px; padding: 40px 20px; text-align: center; cursor: pointer; transition: background .2s, border-color .2s; background: #0f3460; min-width: 260px; flex: 1; min-height: 320px; display: flex; flex-direction: column; align-items: center; justify-content: center; }
   #drop-zone:hover, #drop-zone.drag-over { background: #1a4a80; border-color: #81d4fa; }
   #drop-zone svg { opacity: .6; margin-bottom: 12px; }
   #drop-zone p { color: #90caf9; font-size: 0.9rem; line-height: 1.6; }
   #file-input { display: none; }
 
   /* text area */
-  #texto-area { margin-top: 12px; }
-  #texto-area textarea { width: 100%; height: 90px; background: #0f3460; border: 1px solid #1565c0; border-radius: 8px; color: #e0e0e0; padding: 10px; font-size: 0.85rem; resize: vertical; }
+  #texto-area { margin-top: 12px; display: flex; flex-direction: column; flex: 1; }
+  #texto-area textarea { width: 100%; flex: 1; min-height: 320px; background: #0f3460; border: 1px solid #1565c0; border-radius: 8px; color: #e0e0e0; padding: 10px; font-size: 0.9rem; resize: vertical; }
   .texto-actions { display: grid; grid-template-columns: 1fr auto; gap: 8px; margin-top: 6px; }
   .texto-actions button { width: 100%; white-space: nowrap; }
 
+  /* mode toggle */
+  #mode-toggle { display: flex; gap: 6px; background: #0f3460; padding: 4px; border-radius: 10px; }
+  #mode-toggle button { flex: 1; padding: 8px; border: none; border-radius: 7px; cursor: pointer; font-size: 0.85rem; background: transparent; color: #90caf9; transition: background .15s, color .15s; }
+  #mode-toggle button.active { background: #1565c0; color: #fff; }
+  .modo-oculto { display: none !important; }
+
   /* left panel */
-  #left { display: flex; flex-direction: column; gap: 12px; width: 270px; flex-shrink: 0; }
-  #file-list { background: #0f3460; border-radius: 8px; padding: 8px; flex: 1; overflow-y: auto; max-height: 300px; }
+  #left { display: flex; flex-direction: column; gap: 12px; width: 340px; flex-shrink: 0; }
+  #file-list { background: #0f3460; border-radius: 8px; padding: 8px; overflow-y: auto; max-height: 180px; flex-shrink: 0; }
+  #file-list:empty { display: none; }
   .file-item { display: flex; align-items: center; gap: 8px; padding: 5px 6px; border-radius: 6px; font-size: 0.82rem; }
   .file-item .icon { font-size: 1rem; }
 
@@ -109,16 +117,22 @@
 
 <main>
   <div id="left">
-    <div id="drop-zone">
-      <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#4fc3f7" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-      <p>Arrasta imagens aqui<br>ou clica para selecionar</p>
-      <input type="file" id="file-input" accept="image/*" multiple>
+    <div id="mode-toggle">
+      <button id="modo-btn-texto" class="active" onclick="mudarModo('texto')">📝 Texto</button>
+      <button id="modo-btn-imagem" onclick="mudarModo('imagem')">🖼️ Imagem</button>
     </div>
 
-    <div id="file-list"></div>
+    <div id="zona-imagem" class="modo-oculto">
+      <div id="drop-zone">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#4fc3f7" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        <p>Arrasta imagens aqui<br>ou clica para selecionar</p>
+        <input type="file" id="file-input" accept="image/*" multiple>
+      </div>
+      <div id="file-list"></div>
+    </div>
 
     <div id="texto-area">
-      <textarea id="texto-input" placeholder="Ou cola aqui o texto da encomenda…"></textarea>
+      <textarea id="texto-input" placeholder="Cola aqui o texto da encomenda…"></textarea>
       <div class="texto-actions">
         <button class="btn-green" id="btn-texto" onclick="processarTexto()">Processar texto</button>
         <button class="btn-secondary" type="button" onclick="limpar()">Limpar</button>
@@ -191,6 +205,16 @@ fileInput.addEventListener('change', () => {
   fileInput.value = '';
 });
 
+// ── Alternar modo texto/imagem ────────────────────────────────
+function mudarModo(modo) {
+  const ehTexto = modo === 'texto';
+  document.getElementById('texto-area').classList.toggle('modo-oculto', !ehTexto);
+  document.getElementById('zona-imagem').classList.toggle('modo-oculto', ehTexto);
+  document.getElementById('modo-btn-texto').classList.toggle('active', ehTexto);
+  document.getElementById('modo-btn-imagem').classList.toggle('active', !ehTexto);
+  if (ehTexto) document.getElementById('texto-input').focus();
+}
+
 // ── Processar imagens ────────────────────────────────────────
 async function processarFicheiros(files) {
   if (!modelosReady) { alert('Aguarda — modelos ainda a carregar.'); return; }
@@ -220,6 +244,7 @@ async function processarTexto() {
   if (!modelosReady) { alert('Aguarda — modelos ainda a carregar.'); return; }
   const texto = document.getElementById('texto-input').value.trim();
   if (!texto) return;
+  limparResultados();
   mostrarLoading('A processar texto…');
   try {
     const r = await fetch('/processar_texto', {
@@ -289,15 +314,19 @@ function adicionarResultados(data) {
   document.getElementById('btn-export').disabled = identificados === 0;
 }
 
-function limpar() {
+function limparResultados() {
   resultados = [];
+  document.getElementById('tbody').innerHTML = '';
+  document.getElementById('total-txt').textContent = '';
+  document.getElementById('btn-export').disabled = true;
+}
+
+function limpar() {
+  limparResultados();
   document.getElementById('texto-input').value = '';
   document.getElementById('file-input').value = '';
   document.getElementById('drop-zone').classList.remove('drag-over');
-  document.getElementById('tbody').innerHTML = '';
   document.getElementById('file-list').innerHTML = '';
-  document.getElementById('total-txt').textContent = '';
-  document.getElementById('btn-export').disabled = true;
 }
 
 function mostrarLoading(txt) {
