@@ -6,9 +6,10 @@ import secrets
 import sys
 import tempfile
 import threading
+import time
 import unicodedata
 import webbrowser
-from collections import Counter
+from collections import Counter, OrderedDict
 from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
@@ -37,6 +38,26 @@ if OUTPUT_DIR:
 # Registo de linhas não-reconhecidas, para perceber a tendência dos erros
 # e priorizar que aliases criar a seguir.
 _LOG_NAO_RECONHECIDAS = _USER_DIR / "data" / "nao_reconhecidas.jsonl"
+
+# Aliases aprendidos pelo utilizador (botão "Corrigir" na UI). Ficheiro
+# separado do aliases.json curado à mão; é fundido por cima ao carregar.
+_ALIASES_APRENDIDOS = _USER_DIR / "data" / "aliases_aprendidos.json"
+
+
+def _carregar_aliases_aprendidos() -> dict:
+    try:
+        with open(_ALIASES_APRENDIDOS, encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _gravar_alias_aprendido(chave: str, produto: str) -> None:
+    aprendidos = _carregar_aliases_aprendidos()
+    aprendidos[chave] = produto
+    _ALIASES_APRENDIDOS.parent.mkdir(parents=True, exist_ok=True)
+    with open(_ALIASES_APRENDIDOS, "w", encoding="utf-8") as f:
+        json.dump(aprendidos, f, ensure_ascii=False, indent=2)
 
 
 def _normalizar_para_tendencia(linha: str) -> str:
@@ -137,14 +158,23 @@ def _linha_idx(linhas: list[str], trecho: str) -> int | None:
     return None
 
 
+# Marcador especial: a colega confirmou via botão Corrigir que este texto
+# não corresponde a nenhum produto da loja. Gravado como alias para "".
+INEXISTENTE = "__INEXISTENTE__"
+
+
 def _erro_linha(idx: int, linha: str) -> dict:
+    chave = _normalizar_para_tendencia(linha)
+    inexistente = _carregar_aliases_aprendidos().get(chave) == INEXISTENTE
     return {
         "ficheiro":     "texto colado",
         "produto":      "",
-        "qtd":          "",
+        # quantidade deduzida do texto, para o caso de a colega corrigir a linha
+        "qtd":          _quantidade_linha(linha),
         "score":        0,
         "ref":          "",
         "texto_origem": f"linha {idx}: {linha}",
+        "inexistente":  inexistente,
     }
 
 
@@ -216,7 +246,14 @@ def _quantidade_de_cada(linha: str) -> int:
     return int(nums[-1]) if nums else 1
 
 
-def _quantidade_linha(linha: str) -> int:
+def _quantidade_linha(linha: str, ignorar: set[str] | None = None) -> int:
+    """
+    Deduz a quantidade da linha. `ignorar` é um conjunto de números que NÃO
+    devem ser tratados como quantidade — tipicamente identificadores de produto
+    já reconhecidos (ex: em "6 like gel 139, 197, 120" o 139/197/120 são produtos,
+    a quantidade é o 6).
+    """
+    ignorar = ignorar or set()
     m = re.search(r"\b(\d+)\s*(?:unidades?|un|und|pcs?)\b", linha, re.IGNORECASE)
     if m:
         return int(m.group(1))
@@ -226,9 +263,15 @@ def _quantidade_linha(linha: str) -> int:
     nums = [
         m.group(1)
         for m in re.finditer(r"\b(\d+)\b", linha)
-        if not re.match(r"\s*(?:g|gr|gramas?|ml)\b", linha[m.end():], re.IGNORECASE)
+        if m.group(1) not in ignorar
+        and not re.match(r"\s*(?:g|gr|gramas?|ml)\b", linha[m.end():], re.IGNORECASE)
     ]
-    return int(nums[-1]) if nums else 1
+    if not nums:
+        return 1
+    # Vários números "soltos" (sem unidade) e nenhum é quantidade explícita:
+    # a quantidade costuma ser o PRIMEIRO (ex: "6 like gel 139, 197, 120" → 6),
+    # não o último, que seria mais um identificador.
+    return int(nums[0])
 
 
 def _token_e_quantidade(linha: str, match: re.Match) -> bool:
@@ -240,12 +283,32 @@ def _token_e_quantidade(linha: str, match: re.Match) -> bool:
     )
 
 
+def _singular(token: str) -> str:
+    """Normaliza plurais portugueses simples para o singular, para que
+    'recargas'≡'recarga', 'brocas'≡'broca', 'lixas'≡'lixa'. Mantém números."""
+    if token.isdigit() or len(token) < 4:
+        return token
+    if token.endswith("oes"):     # botoes→botao
+        return token[:-3] + "ao"
+    if token.endswith("aes"):     # paes→pao
+        return token[:-3] + "ao"
+    if token.endswith("ais"):     # casais→casal
+        return token[:-3] + "al"
+    if token.endswith("eis"):     # papeis→papel
+        return token[:-3] + "el"
+    if token.endswith("ns"):      # garrafons→garrafom (raro)
+        return token[:-2] + "m"
+    if token.endswith("s"):       # recargas→recarga, brocas→broca
+        return token[:-1]
+    return token
+
+
 def _mapa_tokens_unicos(produtos: list[str]) -> dict[str, str]:
     token_produto: dict[str, str] = {}
     repetidos: set[str] = set()
 
     for produto in produtos:
-        for token in set(re.findall(r"\w+", _normalizar_token(produto))):
+        for token in {_singular(t) for t in re.findall(r"\w+", _normalizar_token(produto))}:
             if len(token) < 3 and not token.isdigit():
                 continue
             if token in token_produto and token_produto[token] != produto:
@@ -256,12 +319,29 @@ def _mapa_tokens_unicos(produtos: list[str]) -> dict[str, str]:
     return {token: produto for token, produto in token_produto.items() if token not in repetidos}
 
 
-def _expandir_identificadores_unicos(linhas: list[str], produtos: list[str], sku_map: dict) -> list[dict]:
+def _base_comum(nomes) -> str:
+    """Prefixo de palavras comum a vários nomes, parando no 1º número/diferença.
+    Ex: ["like gel 139 roxo", "like gel 197 chili"] → "like gel"."""
+    listas = [n.lower().split() for n in nomes]
+    if not listas:
+        return ""
+    base = []
+    for tokens in zip(*listas):
+        t = tokens[0]
+        if t.isdigit() or any(x != t for x in tokens):
+            break
+        base.append(t)
+    return " ".join(base)
+
+
+def _expandir_identificadores_unicos(linhas: list[str], produtos: list[str], sku_map: dict,
+                                     ignorar_linhas: set[int] | None = None) -> list[dict]:
     unicos = _mapa_tokens_unicos(produtos)
+    ignorar_linhas = ignorar_linhas or set()
     resultados = []
 
     for idx, linha in enumerate(linhas, 1):
-        if _linha_so_contexto(linha):
+        if idx in ignorar_linhas or _linha_so_contexto(linha):
             continue
 
         produtos_linha: dict[str, str] = {}
@@ -270,14 +350,35 @@ def _expandir_identificadores_unicos(linhas: list[str], produtos: list[str], sku
             token = match.group(0)
             if token.isdigit() and _token_e_quantidade(linha_norm, match):
                 continue
-            produto = unicos.get(token)
+            produto = unicos.get(_singular(token))
             if produto:
                 produtos_linha[produto] = token
 
         if not produtos_linha:
             continue
 
-        qty = _quantidade_linha(linha)
+        # Desambiguação por base: se algum produto foi reconhecido por número
+        # (ex: "like gel 104" → base "like gel"), usar essa base para resolver os
+        # outros números da linha que ficaram por reconhecer por serem ambíguos
+        # sozinhos (ex: "120" em "like gel 104, 120" → "like gel 120 ...").
+        produtos_por_num = {tok: prod for prod, tok in produtos_linha.items() if tok.isdigit()}
+        if produtos_por_num:
+            base = _base_comum(produtos_por_num.values())
+            if base:
+                for match in re.finditer(r"\b(\d+)\b", linha_norm):
+                    num = match.group(1)
+                    if num in produtos_por_num or _token_e_quantidade(linha_norm, match):
+                        continue
+                    candidatos = [
+                        p for p in produtos
+                        if num in p.lower().split() and p.lower().startswith(base)
+                    ]
+                    if len(candidatos) == 1:
+                        produtos_linha[candidatos[0]] = num
+
+        # Números que são identificadores de produto não contam como quantidade.
+        nums_produto = {tok for tok in produtos_linha.values() if tok.isdigit()}
+        qty = _quantidade_linha(linha, ignorar=nums_produto)
         for produto in produtos_linha:
             resultados.append({
                 "ficheiro":     "texto colado",
@@ -309,13 +410,30 @@ def _expandir_aliases_diretos(linhas: list[str], aliases: dict, sku_map: dict) -
             alias_norm = _normalizar_token(alias)
             if not alias_norm:
                 continue
-            if not re.search(rf"(?<!\w){re.escape(alias_norm)}(?!\w)", linha_norm):
+            m_alias = re.search(rf"(?<!\w){re.escape(alias_norm)}(?!\w)", linha_norm)
+            if not m_alias:
                 continue
 
+            # Aliases multi-palavra genéricos (ex: "rosa leitoso") não devem
+            # disparar quando são só um pedaço de um produto maior na linha
+            # (ex: "fiber base rosa leitoso cintilante" → deve ir à AI). Só
+            # aplica se as palavras da linha fora do alias forem insignificantes.
+            palavras_alias = alias_norm.split()
+            if len(palavras_alias) >= 2:
+                resto = (linha_norm[:m_alias.start()] + " " + linha_norm[m_alias.end():])
+                extra = [w for w in resto.split() if not w.isdigit() and len(w) >= 3]
+                if len(extra) >= 2:
+                    continue  # linha tem contexto a mais → deixa a AI decidir
+
+            # Quantidade só do segmento até ao fim do alias (a qty vem antes do
+            # produto: "2 like gel 104"); números depois do alias pertencem a
+            # outros produtos da linha. Os do próprio alias são identificadores.
+            segmento = linha_norm[:m_alias.end()]
+            nums_alias = set(re.findall(r"\d+", alias_norm))
             resultados.append({
                 "ficheiro":     "texto colado",
                 "produto":      produto,
-                "qtd":          _quantidade_linha(linha),
+                "qtd":          _quantidade_linha(segmento, ignorar=nums_alias),
                 "score":        1.0,
                 "ref":          sku_map.get(produto, ""),
                 "texto_origem": f"linha {idx}: {linha}",
@@ -417,6 +535,88 @@ def _expandir_regras_de_cada(linhas: list[str], sku_map: dict) -> list[dict]:
     return resultados
 
 
+# Código SKU: NN.NN.NNN com pontos, espaços ou traços como separador.
+_RE_SKU = re.compile(r"(?<!\d)(\d{2})[.\s-](\d{2})[.\s-](\d{3})(?!\d)")
+
+
+def _expandir_referencias_sku(linhas: list[str], sku_map: dict) -> list[dict]:
+    """
+    Linha que contém um código SKU (ex: "3 - 93.01.018") → produto desse SKU.
+    A quantidade vem do número antes do código. SKU inexistente → não dispara.
+    """
+    ref_para_produto = {ref: nome for nome, ref in sku_map.items() if ref}
+    resultados = []
+    for idx, linha in enumerate(linhas, 1):
+        for m in _RE_SKU.finditer(linha):
+            ref = f"{m.group(1)}.{m.group(2)}.{m.group(3)}"
+            produto = ref_para_produto.get(ref)
+            if not produto:
+                continue
+            antes = linha[:m.start()]
+            m_qty = re.search(r"(\d+)\s*[-.)]?\s*$", antes)
+            qty = int(m_qty.group(1)) if m_qty else 1
+            resultados.append({
+                "ficheiro":     "texto colado",
+                "produto":      produto,
+                "qtd":          qty,
+                "score":        1.0,
+                "ref":          ref,
+                "texto_origem": f"linha {idx}: {linha}",
+                "_linha_idx":   idx,
+            })
+    return resultados
+
+
+def _mapa_brocas_numeradas(produtos: list[str]) -> dict[str, str]:
+    """{ '12': '12 - broca flecha ...' } para os produtos broca numerados (N - broca …)."""
+    mapa: dict[str, str] = {}
+    for p in produtos:
+        m = re.match(r"^(\d+)\s*-\s*broca\b", p.lower())
+        if m:
+            mapa[m.group(1)] = p
+    return mapa
+
+
+def _expandir_brocas_numeradas(linhas: list[str], produtos: list[str], sku_map: dict) -> list[dict]:
+    """
+    "broca(s) N" ou "N broca(s)" → produto numerado "N - broca …".
+    Ex: "3 brocas 12" → '12 - broca flecha …' com qty=3.
+    O número que casa a broca é o identificador; a quantidade vem do outro número.
+    """
+    mapa = _mapa_brocas_numeradas(produtos)
+    if not mapa:
+        return []
+
+    resultados = []
+    for idx, linha in enumerate(linhas, 1):
+        lower = linha.lower()
+        m_broca = re.search(r"\bbrocas?\b", lower)
+        if not m_broca:
+            continue
+        # O número ANTES de "broca(s)" é quantidade; os DEPOIS são identificadores
+        # (ex: "3 brocas 12" → qty 3, broca 12). Evita tratar a qty como broca nº.
+        ids_broca = [
+            m.group(1) for m in re.finditer(r"\b(\d+)\b", lower)
+            if m.start() > m_broca.start() and m.group(1) in mapa
+        ]
+        if not ids_broca:
+            continue
+        m_qty = re.search(r"(\d+)\s*$", lower[:m_broca.start()])
+        qty = int(m_qty.group(1)) if m_qty else 1
+        for num in dict.fromkeys(ids_broca):  # únicos, mantém ordem
+            produto = mapa[num]
+            resultados.append({
+                "ficheiro":     "texto colado",
+                "produto":      produto,
+                "qtd":          qty,
+                "score":        1.0,
+                "ref":          sku_map.get(produto, ""),
+                "texto_origem": f"linha {idx}: {linha}",
+                "_linha_idx":   idx,
+            })
+    return resultados
+
+
 def _melhor_linha_origem(produto: str, linhas: list[str], fuzz_mod, todos_produtos: list[str] = None) -> str:
     genericas = {
         "verniz", "gel", "normal", "unidade", "unidades", "un", "pcs", "cada",
@@ -502,6 +702,21 @@ def logout():
     return redirect("/login")
 
 
+def _aplicar_aliases_aprendidos() -> None:
+    """Funde os aliases aprendidos (botão Corrigir) por cima dos curados, em memória."""
+    if _pipeline is None:
+        return
+    aprendidos = _carregar_aliases_aprendidos()
+    if not aprendidos:
+        return
+    # Marcadores de "não existe na loja" → alias para "" (linha ignorada no matching).
+    efetivos = {k: ("" if v == INEXISTENTE else v) for k, v in aprendidos.items()}
+    for campo in ("aliases", "ai_aliases"):
+        base = _pipeline.get(campo)
+        if isinstance(base, dict):
+            _pipeline[campo] = {**base, **efetivos}
+
+
 def _load_pipeline():
     global _pipeline
     from dotenv import load_dotenv
@@ -542,6 +757,7 @@ def _load_pipeline():
             })
             print("[AI] Claude ativo para texto (batches paralelos).")
 
+    _aplicar_aliases_aprendidos()
     print("[pipeline] Pronto.")
 
 
@@ -668,6 +884,102 @@ def tendencias():
     return jsonify({"total": total, "distintas": len(contagem), "top": top})
 
 
+def _catalogo_produtos() -> tuple[list, dict]:
+    """Lista de produtos + sku_map ativos no pipeline (qualquer modo)."""
+    if _pipeline is None:
+        return [], {}
+    produtos = _pipeline.get("ai_produtos") or _pipeline.get("produtos") or []
+    sku_map = _pipeline.get("ai_sku_map") or _pipeline.get("sku_map") or {}
+    return produtos, sku_map
+
+
+@app.route("/produtos")
+@login_required
+def produtos():
+    """Catálogo local (nome + ref) — estado inicial/fallback do seletor Corrigir."""
+    prods, sku_map = _catalogo_produtos()
+    return jsonify([{"produto": p, "ref": sku_map.get(p, "")} for p in prods])
+
+
+def _pesquisar_local(termo: str, limite: int = 15) -> list[dict]:
+    prods, sku_map = _catalogo_produtos()
+    q = _normalizar_token(termo)
+    if not q:
+        return [{"produto": p, "ref": sku_map.get(p, "")} for p in prods[:limite]]
+    hits = [p for p in prods if q in _normalizar_token(p)]
+    return [{"produto": p, "ref": sku_map.get(p, "")} for p in hits[:limite]]
+
+
+# Cache LRU em memória das pesquisas à API (evita bater na Shopkit repetidamente).
+# chave normalizada -> (timestamp, resultados). Teto fixo: ao exceder, descarta-se
+# a entrada menos recentemente usada — memória constante, sem crescimento sem fim.
+_CACHE_PESQUISA: "OrderedDict[str, tuple[float, list]]" = OrderedDict()
+_CACHE_PESQUISA_TTL = 600   # 10 minutos
+_CACHE_PESQUISA_MAX = 200   # nº máximo de termos guardados
+
+
+def _cache_pesquisa_guardar(chave: str, agora: float, resultados: list) -> None:
+    _CACHE_PESQUISA[chave] = (agora, resultados)
+    _CACHE_PESQUISA.move_to_end(chave)  # marca como usada há menos tempo
+    while len(_CACHE_PESQUISA) > _CACHE_PESQUISA_MAX:
+        _CACHE_PESQUISA.popitem(last=False)  # descarta a mais antiga (LRU)
+
+
+@app.route("/pesquisar_produto")
+@login_required
+def pesquisar_produto():
+    """Pesquisa ao vivo na loja Shopkit (com cache LRU 10 min e fallback local)."""
+    termo = (request.args.get("q") or "").strip()
+    chave = _normalizar_token(termo)
+    api_key = os.environ.get("SHOPKIT_API_KEY")
+
+    if api_key and termo:
+        agora = time.time()
+        em_cache = _CACHE_PESQUISA.get(chave)
+        if em_cache and agora - em_cache[0] < _CACHE_PESQUISA_TTL:
+            _CACHE_PESQUISA.move_to_end(chave)  # acesso recente
+            return jsonify({"fonte": "cache", "produtos": em_cache[1]})
+        try:
+            import shopkit_api
+            resultados = shopkit_api.pesquisar(api_key, termo)
+            _cache_pesquisa_guardar(chave, agora, resultados)
+            return jsonify({"fonte": "api", "produtos": resultados})
+        except Exception as e:
+            print(f"[pesquisar_produto] API falhou ({e}); fallback local.")
+    return jsonify({"fonte": "local", "produtos": _pesquisar_local(termo)})
+
+
+@app.route("/aprender_alias", methods=["POST"])
+@login_required
+def aprender_alias():
+    """Recebe {texto, produto}: grava um alias e aplica-o de imediato em memória."""
+    dados = request.get_json(silent=True) or {}
+    texto = (dados.get("texto") or "").strip()
+    produto = (dados.get("produto") or "").strip()
+    ref_enviada = (dados.get("ref") or "").strip()
+    if not texto or not produto:
+        return jsonify({"ok": False, "erro": "texto e produto são obrigatórios"}), 400
+
+    chave = _normalizar_para_tendencia(texto)
+    if not chave:
+        return jsonify({"ok": False, "erro": "texto sem conteúdo útil"}), 400
+
+    if produto == INEXISTENTE:
+        # A colega marcou que este texto não existe na loja.
+        _gravar_alias_aprendido(chave, INEXISTENTE)
+        _aplicar_aliases_aprendidos()
+        return jsonify({"ok": True, "chave": chave, "inexistente": True})
+
+    # Produto pode vir do catálogo local ou de uma pesquisa ao vivo na API.
+    # A ref do catálogo tem prioridade; senão usa-se a que veio da pesquisa.
+    _, sku_map = _catalogo_produtos()
+    ref = sku_map.get(produto) or ref_enviada
+
+    _gravar_alias_aprendido(chave, produto)
+    _aplicar_aliases_aprendidos()
+    return jsonify({"ok": True, "chave": chave, "produto": produto, "ref": ref})
+
+
 @app.route("/config", methods=["GET"])
 @login_required
 def get_config():
@@ -748,7 +1060,11 @@ def processar():
                 aliases_img = pl.get("aliases", {})
                 regras: list[dict] = []
                 regras.extend(_expandir_aliases_diretos(linhas_img, aliases_img, pl["sku_map"]))
-                regras.extend(_expandir_identificadores_unicos(linhas_img, pl["produtos"], pl["sku_map"]))
+                regras.extend(_expandir_referencias_sku(linhas_img, pl["sku_map"]))
+                brocas_img = _expandir_brocas_numeradas(linhas_img, pl["produtos"], pl["sku_map"])
+                regras.extend(brocas_img)
+                regras.extend(_expandir_identificadores_unicos(linhas_img, pl["produtos"], pl["sku_map"],
+                                                               ignorar_linhas={r["_linha_idx"] for r in brocas_img}))
                 regras.extend(_expandir_lista_variantes_numeradas(linhas_img, pl["produtos"], pl["sku_map"]))
                 regras.extend(_expandir_regras_de_cada(linhas_img, pl["sku_map"]))
                 for r in regras:
@@ -812,7 +1128,11 @@ def processar_texto():
 
         # 1) Regras PLN sobre todas as linhas
         resultados.extend(_expandir_aliases_diretos(linhas, aliases_t, sku_final))
-        resultados.extend(_expandir_identificadores_unicos(linhas, prods_t, sku_final))
+        resultados.extend(_expandir_referencias_sku(linhas, sku_final))
+        brocas = _expandir_brocas_numeradas(linhas, prods_t, sku_final)
+        resultados.extend(brocas)
+        linhas_brocas = {r["_linha_idx"] for r in brocas}
+        resultados.extend(_expandir_identificadores_unicos(linhas, prods_t, sku_final, ignorar_linhas=linhas_brocas))
         resultados.extend(_expandir_lista_variantes_numeradas(linhas, prods_t, sku_final))
         resultados.extend(_expandir_regras_de_cada(linhas, sku_final))
 
@@ -895,7 +1215,11 @@ def processar_texto():
         rows = pl["pl"].processar_texto(texto_proc, pl["produtos"], pl["emb_prod"],
                                          pl.get("freq_palavras"), pl.get("palavras_unicas"))
         resultados.extend(_expandir_aliases_diretos(linhas, pl.get("aliases", {}), pl["sku_map"]))
-        resultados.extend(_expandir_identificadores_unicos(linhas, pl["produtos"], pl["sku_map"]))
+        resultados.extend(_expandir_referencias_sku(linhas, pl["sku_map"]))
+        brocas = _expandir_brocas_numeradas(linhas, pl["produtos"], pl["sku_map"])
+        resultados.extend(brocas)
+        resultados.extend(_expandir_identificadores_unicos(linhas, pl["produtos"], pl["sku_map"],
+                                                           ignorar_linhas={r["_linha_idx"] for r in brocas}))
         resultados.extend(_expandir_lista_variantes_numeradas(linhas, pl["produtos"], pl["sku_map"]))
         resultados.extend(_expandir_regras_de_cada(linhas, pl["sku_map"]))
         if rows:

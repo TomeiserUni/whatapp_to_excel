@@ -7,6 +7,7 @@ import pickle
 import re
 import sys
 import time
+import unicodedata
 from html import unescape
 from pathlib import Path
 
@@ -78,9 +79,85 @@ def fetch_todos(api_key: str, limit: int = 100) -> list[dict]:
     return produtos
 
 
+def _sem_acentos(texto: str) -> str:
+    return "".join(
+        c for c in unicodedata.normalize("NFD", (texto or "").lower())
+        if unicodedata.category(c) != "Mn"
+    )
+
+
+# Unidades que o cliente escreve mas não fazem parte do nome do produto
+# (ex: "lâmpada 90 w" → o nome é "lâmpada led/uv 90"). São ignoradas na pesquisa.
+_UNIDADES_PESQUISA = {"w", "watt", "watts", "g", "gr", "gramas", "grama", "ml", "mm", "cm"}
+
+
+def _palavras_pesquisa(termo: str) -> list[str]:
+    """
+    Palavras úteis do termo para o filtro AND: sem acentos, com a unidade
+    separada do número ('90w'→'90') e as unidades comuns descartadas.
+    """
+    palavras: list[str] = []
+    for bruto in _sem_acentos(termo).split():
+        # separa número colado a unidade: "90w" -> "90", "w"
+        m = re.match(r"^(\d+)([a-z]+)$", bruto)
+        partes = [m.group(1), m.group(2)] if m else [bruto]
+        for parte in partes:
+            if parte and parte not in _UNIDADES_PESQUISA:
+                palavras.append(parte)
+    return palavras
+
+
+def pesquisar(api_key: str, termo: str, limit: int = 30) -> list[dict]:
+    """
+    Pesquisa ao vivo na loja (parâmetro ?q=) e filtra para devolver SÓ os
+    produtos cujo nome contém todas as palavras do termo (AND, sem acentos).
+    Remove o ruído da API (matches por descrição). Estado ignorado — esgotados
+    incluídos. Devolve {nome, ref} normalizado como o catálogo.
+    """
+    termo = (termo or "").strip()
+    if not termo:
+        return []
+    palavras = _palavras_pesquisa(termo)
+    if not palavras:
+        return []
+    # A API pesquisa pela frase e devolve vazio para combinações que não existem
+    # tal-e-qual. Pesquisamos só pela palavra mais distintiva (a mais longa) e
+    # aplicamos o AND completo localmente sobre o nome.
+    termo_api = max(palavras, key=len)
+    r = requests.get(
+        f"{API_BASE}/product",
+        headers={"X-API-KEY": api_key},
+        params={"q": termo_api, "limit": 100},
+        timeout=15,
+    )
+    r.raise_for_status()
+    if not r.text.strip():
+        return []  # API devolveu corpo vazio (sem resultados)
+    body = r.json()
+    brutos = [v for k, v in body.items() if k.isdigit() and isinstance(v, dict)]
+    resultados: list[dict] = []
+    vistos: set[str] = set()
+    for p in brutos:
+        if not _produto_vendavel(p):
+            continue
+        nome = _normalizar_nome(p.get("title", ""))
+        if not nome or nome in vistos:
+            continue
+        nome_sa = _sem_acentos(nome)
+        if not all(palavra in nome_sa for palavra in palavras):
+            continue  # ruído: a palavra não está no nome
+        vistos.add(nome)
+        resultados.append({"produto": nome, "ref": (p.get("reference") or "").strip()})
+        if len(resultados) >= limit:
+            break
+    return resultados
+
+
 def _produto_vendavel(p: dict) -> bool:
-    if p.get("status_alias") != "active":
-        return False
+    # O estado (active / out_of_stock) não importa: o stock é gerido depois,
+    # no programa de faturação. Basta o produto existir na loja, ou seja, ter
+    # referência. Excluem-se apenas itens sem referência (workshops, catálogo…)
+    # e categorias da blocklist.
     if not (p.get("reference") or "").strip():
         return False
     categorias = {(c.get("title") or "").lower() for c in (p.get("categories") or [])}
@@ -154,7 +231,7 @@ def main() -> int:
     print(f"[shopkit] {len(produtos_api)} entradas recebidas do API.")
 
     nomes, sku_map, meta = extrair_para_catalogo(produtos_api)
-    print(f"[shopkit] {len(nomes)} produtos válidos após filtros (ativos, com referência).")
+    print(f"[shopkit] {len(nomes)} produtos válidos após filtros (com referência).")
 
     guardar(nomes, sku_map, meta)
     print(f"[shopkit] Guardado em {DATA_DIR}/{{prod.pkl, sku_map.pkl, prod_meta.json}}.")

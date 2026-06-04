@@ -63,6 +63,16 @@
   .score-high { color: #66bb6a; }
   .score-mid  { color: #ffa726; }
   .score-low  { color: #ef5350; }
+  .btn-corrigir { padding: 4px 12px; font-size: .78rem; background: #37474f; color: #b3e5fc; border-radius: 6px; }
+  .btn-corrigir:hover { background: #455a64; }
+  .btn-inexistente { background: #4e342e; color: #ffab91; }
+  .btn-inexistente:hover { background: #5d4037; }
+  .corr-box { display: flex; gap: 6px; align-items: center; }
+  .corr-box input { flex: 1; padding: 6px 10px; background: #0f3460; border: 1px solid #1565c0; border-radius: 6px; color: #e0e0e0; font-size: .82rem; }
+  .corr-list { position: absolute; z-index: 30; background: #16213e; border: 1px solid #1565c0; border-radius: 6px; max-height: 220px; overflow-y: auto; min-width: 320px; box-shadow: 0 6px 20px rgba(0,0,0,.5); }
+  .corr-list div { padding: 6px 12px; cursor: pointer; font-size: .82rem; }
+  .corr-list div:hover { background: #1565c0; }
+  .corr-list .ref { color: #607d8b; font-size: .72rem; }
 
   /* bottom */
   footer { background: #16213e; padding: 12px 24px; display: flex; gap: 10px; align-items: center; border-top: 1px solid #0f3460; }
@@ -118,8 +128,8 @@
 <main>
   <div id="left">
     <div id="mode-toggle">
-      <button id="modo-btn-texto" class="active" onclick="mudarModo('texto')">📝 Texto</button>
-      <button id="modo-btn-imagem" onclick="mudarModo('imagem')">🖼️ Imagem</button>
+      <button id="modo-btn-texto" class="active" onclick="mudarModo('texto')"> Texto</button>
+      <button id="modo-btn-imagem" onclick="mudarModo('imagem')">Imagem</button>
     </div>
 
     <div id="zona-imagem" class="modo-oculto">
@@ -160,7 +170,7 @@
 
 <footer>
   <button class="btn-primary" id="btn-export" onclick="exportar()" disabled>Exportar Excel</button>
-  <button class="btn-secondary" onclick="limpar()">Limpar</button>
+  <button class="btn-secondary" onclick="limparResultados()">Limpar</button>
   <span id="total-txt" style="margin-left:8px;font-size:.85rem;color:#90caf9;"></span>
 </footer>
 
@@ -172,6 +182,109 @@
 <script>
 let resultados = [];
 let modelosReady = false;
+
+// ── Linhas não-identificadas (render + correção) ──────────────────
+function renderNaoIdentificada(tr, row) {
+  const texto = (row.texto_origem || '').replace(/^linha \d+:\s*/, '').trim();
+  const rotulo = row.inexistente
+    ? `<span style="color:#ef9a9a;">⚠ Não existe na loja</span>`
+    : `<span style="color:#9e9e9e;font-style:italic;">— não identificado —</span>`;
+  tr.innerHTML =
+    `<td colspan="4">${rotulo}` +
+    (texto ? ` <span style="color:#607d8b;">(${texto})</span>` : '') + `</td>` +
+    `<td><button class="btn-corrigir" type="button">Corrigir</button></td>`;
+  tr.querySelector('.btn-corrigir').onclick = () => abrirCorrecao(tr, texto, row);
+}
+
+function renderIdentificada(tr, row) {
+  const cls = row.score >= 0.95 ? 'score-high' : row.score >= 0.85 ? 'score-mid' : 'score-low';
+  tr.innerHTML =
+    `<td>${row.produto}</td><td>${row.qtd}</td><td class="${cls}">${row.score}</td>` +
+    `<td>${row.ref || ''}</td><td style="color:#90caf9">${row.ficheiro || ''}</td>`;
+}
+
+function abrirCorrecao(tr, texto, row) {
+  const td = tr.querySelector('td');
+  td.colSpan = 5;
+  tr.querySelector('.btn-corrigir').closest('td').remove();
+  td.style.position = 'relative';
+  td.innerHTML =
+    `<div class="corr-box">` +
+    `<input type="text" placeholder="Procurar produto na loja…" value="${texto.replace(/"/g,'&quot;')}">` +
+    `<button class="btn-corrigir btn-inexistente" type="button" title="Marcar que este produto não existe na loja">Não existe na loja</button>` +
+    `<button class="btn-corrigir btn-cancelar" type="button">✕</button>` +
+    `</div><div class="corr-list" style="display:none;"></div>`;
+  const input = td.querySelector('input');
+  const lista = td.querySelector('.corr-list');
+  let timer = null, seq = 0;
+
+  async function pesquisar() {
+    const q = input.value.trim();
+    const meu = ++seq;
+    lista.style.display = 'block';
+    lista.innerHTML = `<div style="color:#9e9e9e;cursor:default;">A procurar na loja…</div>`;
+    try {
+      const r = await fetch('/pesquisar_produto?q=' + encodeURIComponent(q));
+      const d = await r.json();
+      if (meu !== seq) return;  // resposta antiga, ignora
+      const hits = d.produtos || [];
+      lista.innerHTML = hits.map(p =>
+        `<div data-prod="${p.produto.replace(/"/g,'&quot;')}" data-ref="${(p.ref||'').replace(/"/g,'&quot;')}">` +
+        `${p.produto} <span class="ref">${p.ref || ''}</span></div>`
+      ).join('') || `<div style="color:#9e9e9e;cursor:default;">Sem resultados na loja</div>`;
+      lista.querySelectorAll('div[data-prod]').forEach(el => {
+        el.onclick = () => gravarCorrecao(tr, texto, el.dataset.prod, el.dataset.ref, row);
+      });
+    } catch (e) {
+      if (meu === seq) lista.innerHTML = `<div style="color:#ef9a9a;cursor:default;">Erro na pesquisa</div>`;
+    }
+  }
+  function agendar() { clearTimeout(timer); timer = setTimeout(pesquisar, 300); }
+
+  input.oninput = agendar;
+  input.onfocus = pesquisar;
+  td.querySelector('.btn-cancelar').onclick = () => renderNaoIdentificada(tr, row);
+  td.querySelector('.btn-inexistente').onclick = () => marcarInexistente(tr, texto, row);
+  input.focus();
+  pesquisar();
+}
+
+async function marcarInexistente(tr, texto, row) {
+  try {
+    const r = await fetch('/aprender_alias', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ texto, produto: '__INEXISTENTE__' })
+    });
+    const d = await r.json();
+    if (!d.ok) { alert('Erro: ' + (d.erro || 'desconhecido')); return; }
+    row.inexistente = true;
+    renderNaoIdentificada(tr, row);
+  } catch (e) {
+    alert('Falha ao marcar: ' + e);
+  }
+}
+
+async function gravarCorrecao(tr, texto, produto, ref, row) {
+  try {
+    const r = await fetch('/aprender_alias', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ texto, produto, ref })
+    });
+    const d = await r.json();
+    if (!d.ok) { alert('Erro: ' + (d.erro || 'desconhecido')); return; }
+    // Atualiza a linha para o produto escolhido e o resultado em memória
+    row.produto = d.produto; row.ref = d.ref; row.score = 1; row.qtd = row.qtd || 1;
+    row.inexistente = false;
+    renderIdentificada(tr, row);
+    const identificados = resultados.filter(x => x.produto).length;
+    document.getElementById('total-txt').textContent = `${identificados} produto(s) identificado(s)`;
+    document.getElementById('btn-export').disabled = identificados === 0;
+  } catch (e) {
+    alert('Falha ao gravar correção: ' + e);
+  }
+}
 
 // ── Status polling ────────────────────────────────────────────
 function pollStatus() {
@@ -301,11 +414,9 @@ function adicionarResultados(data) {
   data.forEach(row => {
     const tr = document.createElement('tr');
     if (!row.produto) {
-      tr.style.opacity = '0.35';
-      tr.innerHTML = `<td colspan="5" style="font-style:italic;color:#546e7a;">— não identificado —</td>`;
+      renderNaoIdentificada(tr, row);
     } else {
-      const cls = row.score >= 0.95 ? 'score-high' : row.score >= 0.85 ? 'score-mid' : 'score-low';
-      tr.innerHTML = `<td>${row.produto}</td><td>${row.qtd}</td><td class="${cls}">${row.score}</td><td>${row.ref}</td><td style="color:#90caf9">${row.ficheiro}</td>`;
+      renderIdentificada(tr, row);
     }
     tbody.appendChild(tr);
   });
