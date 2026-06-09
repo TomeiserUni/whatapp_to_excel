@@ -8,8 +8,13 @@ from rapidfuzz import fuzz, process
 
 
 def load_produtos(data_dir: Path):
-    with open(data_dir / "prod.pkl", "rb") as f:
-        produtos = pickle.load(f)
+    # prod.pkl é o catálogo local (fallback). Pode não existir no modo só-API,
+    # em que a Shopkit é a única fonte: nesse caso o catálogo local fica vazio.
+    try:
+        with open(data_dir / "prod.pkl", "rb") as f:
+            produtos = pickle.load(f)
+    except FileNotFoundError:
+        produtos = []
     try:
         with open(data_dir / "sku_map.pkl", "rb") as f:
             sku_map = pickle.load(f)
@@ -114,7 +119,7 @@ def _candidatos_por_linha(linha: str, produtos: list, limit: int = 20) -> list:
 
 
 def _extrair_texto_imagem(image_path: Path, client) -> str:
-    """OCR puro: Claude transcreve o texto visível na imagem."""
+    """ Claude transcreve o texto visível na imagem."""
     ext  = image_path.suffix.lower().lstrip(".")
     mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png"}.get(ext, "image/jpeg")
     with open(image_path, "rb") as f:
@@ -175,18 +180,32 @@ def _recuperar_exemplos(texto: str, base_rag: list[dict], top_k: int = 12) -> st
     return "\nExemplos de correspondências anteriores (mais relevantes para este pedido):\n" + "\n".join(lines) + "\n"
 
 
-def processar_imagem(image_path: Path, produtos: list, sku_map: dict, aliases: dict, client, exemplos: list = None) -> tuple[list, str]:
+def processar_imagem(image_path: Path, produtos: list, sku_map: dict, aliases: dict, client, exemplos: list = None, buscar_candidatos=None) -> tuple[list, str]:
     texto = _extrair_texto_imagem(image_path, client)
     if not texto:
         return [], ""
     print(f"[AI OCR] texto extraído: {texto[:200]}")
-    return processar_texto(texto, produtos, sku_map, aliases, client, exemplos or []), texto
+    return processar_texto(texto, produtos, sku_map, aliases, client, exemplos or [], buscar_candidatos), texto
 
 
-def processar_texto(texto: str, produtos: list, sku_map: dict, aliases: dict, client, exemplos: list = None) -> list:
+def processar_texto(
+    texto: str,
+    produtos: list,
+    sku_map: dict,
+    aliases: dict,
+    client,
+    exemplos: list = None,
+    buscar_candidatos=None,
+) -> list:
     """
-    Para cada linha, seleciona candidatos com rapidfuzz.
-    Envia texto + candidatos ao Claude para matching final.
+    Para cada linha, seleciona candidatos e envia texto + candidatos ao Claude
+    para matching final.
+
+    Candidatos: por defeito vêm de rapidfuzz sobre ``produtos`` (catálogo local).
+    Se ``buscar_candidatos`` for dado, é uma função ``linha -> list[{"produto","ref"}]``
+    (pesquisa Shopkit ao vivo): nesse caso a loja passa a ser a fonte dos candidatos
+    e do sku_map, e o catálogo local só é usado como fallback por linha (quando a
+    pesquisa devolve vazio — p. ex. falha de rede).
     """
     linhas_indexadas = _linhas_com_indices(texto)
     if not linhas_indexadas:
@@ -203,32 +222,61 @@ def processar_texto(texto: str, produtos: list, sku_map: dict, aliases: dict, cl
         return []
     linhas = [linha for _idx, linha in linhas_indexadas]
 
-    # Candidatos por linha (linha a linha evita diluição de score)
-    candidatos_score: dict[str, float] = {}
-    for linha in linhas:
+    # sku_map efetivo: começa pelo local e é enriquecido com as refs que a loja
+    # devolver (a fonte principal passa a ser a API quando buscar_candidatos existe).
+    sku_map = dict(sku_map or {})
+
+    def _candidatos_rapidfuzz(linha: str) -> None:
+        """Fallback local: pontua candidatos do catálogo .pkl para uma linha."""
         linha_norm = _normalizar_linha(linha)
         for produto, score, *_ in process.extract(linha_norm, produtos, scorer=fuzz.token_set_ratio, limit=20):
             candidatos_score[produto] = max(candidatos_score.get(produto, 0), score)
-        # Se "de cada", garante que TODAS as variantes do padrão entram no catálogo
-        linha_norm = _normalizar_linha(linha.lower())
-        if "de cada" in linha_norm:
-            prefixo = re.sub(r'\b\d+\b', '', linha_norm.split("de cada")[0]).strip()
-            top_todos = process.extract(prefixo, produtos, scorer=fuzz.token_set_ratio, limit=10)
-            for produto, score, *_ in top_todos:
+        linha_low = _normalizar_linha(linha.lower())
+        if "de cada" in linha_low:
+            prefixo = re.sub(r'\b\d+\b', '', linha_low.split("de cada")[0]).strip()
+            for produto, score, *_ in process.extract(prefixo, produtos, scorer=fuzz.token_set_ratio, limit=10):
                 if score >= 70:
                     candidatos_score[produto] = max(candidatos_score.get(produto, 0), score)
 
-    # Aliases diretos têm sempre prioridade — garante que entram no catálogo
+    # Candidatos por linha (linha a linha evita diluição de score).
+    # A Shopkit é a fonte principal; o catálogo local (.pkl) é a rede de segurança.
+    # O fallback dispara sempre que a loja NÃO dá candidatos para a linha:
+    #   None  -> sem API key, ou erro/timeout real
+    #   []    -> a API respondeu mas não encontrou nada (ex: 'clear' vs 'transparente',
+    #            termos abreviados que o filtro AND da loja não apanha)
+    # Em ambos os casos o rapidfuzz sobre o .pkl recupera a linha.
+    candidatos_score: dict[str, float] = {}
+    for linha in linhas:
+        hits = buscar_candidatos(linha) if buscar_candidatos else None
+        if not hits:
+            _candidatos_rapidfuzz(linha)
+            continue
+        # Shopkit encontrou: o nome já vem normalizado como o catálogo.
+        for h in hits:
+            nome = h.get("produto", "")
+            if not nome:
+                continue
+            candidatos_score[nome] = max(candidatos_score.get(nome, 0), 100)
+            ref = (h.get("ref") or "").strip()
+            if ref:
+                sku_map[nome] = ref
+
+    # Aliases diretos têm sempre prioridade — garante que entram no catálogo.
+    # Com a Shopkit como fonte, o produto-alvo pode não estar na lista local: aceita-o
+    # se já for candidato (veio da loja) ou se constar do catálogo .pkl.
     if aliases:
         texto_lower = texto.lower()
         for alias, produto in aliases.items():
-            if alias.lower() in texto_lower and produto in produtos:
+            if alias.lower() in texto_lower and (produto in candidatos_score or produto in produtos):
                 candidatos_score[produto] = max(candidatos_score.get(produto, 0), 100)
 
     cap = max(60, min(len(linhas) * 8, 180))
     candidatos = [
         produto for produto, _score in sorted(candidatos_score.items(), key=lambda item: item[1], reverse=True)
     ][:cap]
+    # Conjunto efetivo contra o qual a resposta do Claude é validada: os candidatos
+    # enviados no prompt (Shopkit ao vivo) ou, no modo local, o catálogo .pkl.
+    produtos_efetivos = candidatos or list(produtos)
     catalogo    = _build_catalogo(candidatos, sku_map)
     base_rag    = _construir_base_rag(exemplos or [], aliases)
     exemplos_txt = _recuperar_exemplos(texto, base_rag)
@@ -238,17 +286,46 @@ def processar_texto(texto: str, produtos: list, sku_map: dict, aliases: dict, cl
         f"Catálogo de produtos de vernizes/unhas:\n{catalogo}\n"
         f"{exemplos_txt}\n"
         f"Mensagem de encomenda (com número de linha):\n{linhas_numeradas}\n\n"
-        "Identifica TODOS os produtos mencionados e as suas quantidades.\n"
-        "Usa o nome EXATO do catálogo acima — não inventes nomes.\n"
-        "Se um produto não estiver no catálogo, ignora-o.\n"
-        "IMPORTANTE: Linhas como 'Verniz normal', 'Cores novas ...' e 'De cada' isolado são contexto/instruções, não produtos.\n"
-        "IMPORTANTE: Se a mensagem disser 'X de cada' (ex: 'limas retas 1 de cada'), "
-        "lista TODOS os produtos do catálogo que correspondam a X, cada um com a quantidade indicada.\n"
-        "IMPORTANTE: 'direita'/'diretas' = 'reta'/'retas' no contexto de limas.\n"
+        "Identifica os produtos mencionados e as suas quantidades.\n"
+        "\n"
+        "REGRAS OBRIGATÓRIAS:\n"
+        "1. Usa o nome EXATO do catálogo acima — não inventes nomes.\n"
+        "2. Cada palavra distintiva do produto escolhido (nome próprio, cor específica, "
+        "número de variante) TEM de aparecer na linha de onde dizes que vem — exata OU "
+        "como typo razoável OU como abreviação. Categorias genéricas como 'verniz gel', "
+        "'top coat', 'builder' sozinhas NÃO chegam para escolher uma variante.\n"
+        "3. Uma linha normalmente corresponde a UM produto. NUNCA atribuas vários produtos "
+        "à mesma linha, exceto se essa linha tiver o padrão 'X de cada' OU listar "
+        "explicitamente várias cores/variantes separadas por vírgula.\n"
+        "4. Se uma linha menciona só uma categoria genérica (ex: 'verniz gel') sem cor/nome "
+        "específico, ignora-a.\n"
+        "5. Se um produto não estiver no catálogo, ignora-o.\n"
+        "\n"
+        "TOLERÂNCIA A IMPERFEIÇÕES — quando o nome escrito não bate exato com o catálogo:\n"
+        "• Typos de uma ou duas letras: aceita se só houver UM candidato no catálogo "
+        "razoavelmente próximo. Ex: 'tammy natura' → 'tawny natura' (única opção parecida); "
+        "'princepezinho' → 'principezinho'; 'matte' → 'matte finish'. "
+        "Se houver dois candidatos próximos (ex: 'rosa' pode ser 'rosa pop' ou 'rosa sakura'), "
+        "NÃO escolhas — ignora.\n"
+        "• Ordem de palavras trocada: 'top coat like gel' = 'like gel top coat'. Aceita.\n"
+        "• Números aproximados (potência/volume): se o cliente pede um número que não existe "
+        "no catálogo MAS existe UM produto da mesma categoria com número próximo, devolve "
+        "esse. Ex: 'lâmpada LED 99W' → 'lâmpada 90W' (única que existe). "
+        "Se há vários números possíveis (30ml, 50ml, ambos existem), NÃO troques — devolve "
+        "o que o cliente pediu se existir, senão ignora.\n"
+        "• Palavras a mais/a menos: 'brigadeiro' = 'verniz gel brigadeiro natura' (abreviação).\n"
+        "\n"
+        "Linhas-contexto a ignorar: 'Verniz normal', 'Cores novas ...', 'De cada' isolado, "
+        "saudações ('bom dia'…), 'encomenda', 'pedido'.\n"
+        "Padrão 'X de cada' (ex: 'limas retas 1 de cada'): aí sim, lista TODOS os produtos "
+        "do catálogo que correspondam a X, cada um com a quantidade indicada.\n"
+        "Sinónimos: 'direita'/'diretas' = 'reta'/'retas' (limas).\n"
+        "\n"
         'Responde APENAS com JSON válido (sem texto antes ou depois):\n'
         '[{"produto": "nome exato do catálogo", "quantidade": número, "linha": número_da_linha_de_onde_veio}, ...]\n'
-        "O campo \"linha\" é o número que aparece no início da linha da mensagem onde identificaste o produto. "
-        "Se vier de várias linhas, usa a mais relevante. Se não conseguires determinar, omite o campo.\n"
+        'O campo "linha" é OBRIGATÓRIO e tem de corresponder à linha real onde o nome '
+        "específico do produto aparece. Se não consegues apontar uma linha concreta com "
+        "a palavra distintiva, não incluas o produto.\n"
         "Se não houver produtos, responde []."
     )
 
@@ -265,12 +342,98 @@ def processar_texto(texto: str, produtos: list, sku_map: dict, aliases: dict, cl
         print(f"[AI texto] erro: {e}")
         raise RuntimeError(f"Erro ao chamar Claude: {e}") from e
 
+    # Mapa idx_original → texto da linha, para validar atribuições
+    linha_por_idx = {idx: linha for idx, linha in linhas_indexadas}
+    genericas = _palavras_genericas(produtos_efetivos)
+
     resultados = []
     for item in items:
-        match = _match_produto(item.get("produto", ""), produtos)
-        if match:
-            produto_real, score = match
-            linha_idx = item.get("linha")
-            linha_idx = int(linha_idx) if linha_idx is not None else None
-            resultados.append((produto_real, score, int(item.get("quantidade", 1)), linha_idx))
+        match = _match_produto(item.get("produto", ""), produtos_efetivos)
+        if not match:
+            continue
+        produto_real, score = match
+        raw_idx = item.get("linha")
+        linha_idx = int(raw_idx) if raw_idx is not None else None
+
+        # Validação anti-alucinação: o nome distintivo tem de aparecer na linha apontada,
+        # excepto se a linha for um padrão "de cada" (que expande várias variantes).
+        if linha_idx is not None and linha_idx in linha_por_idx:
+            linha_texto = linha_por_idx[linha_idx]
+            if "de cada" not in linha_texto.lower():
+                if not _produto_referenciado_na_linha(produto_real, linha_texto, genericas):
+                    print(f"[AI] descartado (alucinação): {produto_real!r} → linha {linha_idx} {linha_texto!r}")
+                    continue
+
+        # 5º elemento: ref resolvida (Shopkit ou .pkl). Permite ao servidor preencher
+        # o SKU mesmo para produtos que só existem na loja, não no catálogo local.
+        ref = sku_map.get(produto_real, "")
+        resultados.append((produto_real, score, int(item.get("quantidade", 1)), linha_idx, ref))
     return resultados
+
+
+def _palavras_genericas(produtos: list[str]) -> set[str]:
+    """Tokens que aparecem em muitos produtos — não identificam variantes específicas."""
+    base = {
+        "verniz", "gel", "normal", "base", "top", "coat", "ml", "g", "gr",
+        "unidade", "unidades", "un", "pcs", "cada", "de", "da", "do", "com",
+        "para", "e", "natura", "pop", "kit", "para",
+    }
+    contagem: dict[str, int] = {}
+    for p in produtos:
+        for t in re.findall(r"\w+", p.lower()):
+            if len(t) >= 3 and not t.isdigit():
+                contagem[t] = contagem.get(t, 0) + 1
+    # Token genérico = aparece em >5% do catálogo
+    limite = max(3, int(len(produtos) * 0.05))
+    return base | {t for t, c in contagem.items() if c >= limite}
+
+
+def _produto_referenciado_na_linha(produto: str, linha: str, genericas: set[str]) -> bool:
+    """
+    True se pelo menos uma palavra distintiva do produto aparece na linha.
+    Tolerante a typos curtos (ex: tammy↔tawny, 99w↔90w) — confiando que a AI
+    aplicou as regras do prompt para escolher candidato único.
+    """
+    linha_norm = _normalizar_linha(linha).lower()
+    linha_tokens = set(re.findall(r"\w+", linha_norm))
+    if not linha_tokens:
+        return False
+
+    palavras_produto = re.findall(r"\w+", produto.lower())
+    distintivas_alfa = [t for t in palavras_produto if t.isalpha() and len(t) >= 3 and t not in genericas]
+    distintivas_num  = [t for t in palavras_produto if not t.isalpha() and any(c.isdigit() for c in t)]
+
+    if not distintivas_alfa and not distintivas_num:
+        return fuzz.token_set_ratio(produto.lower(), linha_norm) >= 80
+
+    # Palavras alfabéticas: match exato OU typo (≥65) OU substring (abreviação)
+    for d in distintivas_alfa:
+        if d in linha_tokens:
+            return True
+        for t in linha_tokens:
+            if not t.isalpha() or len(t) < 3:
+                continue
+            if fuzz.ratio(d, t) >= 65:
+                return True
+            # Abreviação curta (princip→principezinho): só se a token da linha
+            # for prefixo distintivo da palavra do produto, com ≥4 chars
+            if len(t) >= 4 and d.startswith(t):
+                return True
+
+    # Números: match exato OU número próximo na linha (potência/volume similar)
+    def _so_digitos(tok: str) -> int | None:
+        m = re.search(r"\d+", tok)
+        return int(m.group()) if m else None
+
+    for d in distintivas_num:
+        if d in linha_tokens:
+            return True
+        d_num = _so_digitos(d)
+        if d_num is None:
+            continue
+        for t in linha_tokens:
+            t_num = _so_digitos(t)
+            if t_num is not None and abs(d_num - t_num) <= max(10, d_num // 10):
+                return True
+
+    return False

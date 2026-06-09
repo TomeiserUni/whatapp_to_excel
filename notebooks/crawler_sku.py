@@ -15,11 +15,11 @@ HEADERS = {
                   "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 }
 
-_REMOVER = {"inocos", "hifans"}
+_REMOVER = {"inocos"}
 
 
 def limpar_slug(slug):
-    """'verniz-gel-inocos-agenda-cheia' → 'verniz gel agenda cheia'"""
+    """'verniz-gel-inocos-agenda-cheia' para 'verniz gel agenda cheia'"""
     partes = slug.replace("-", " ").split()
     resultado = []
     for p in partes:
