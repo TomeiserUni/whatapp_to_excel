@@ -107,6 +107,21 @@ def _palavras_pesquisa(termo: str) -> list[str]:
     return palavras
 
 
+def _query_api(api_key: str, palavra: str) -> list[dict]:
+    """Uma query ?q= à loja; devolve os produtos brutos (dicts) dessa palavra."""
+    r = requests.get(
+        f"{API_BASE}/product",
+        headers={"X-API-KEY": api_key},
+        params={"q": palavra, "limit": 100},
+        timeout=15,
+    )
+    r.raise_for_status()
+    if not r.text.strip():
+        return []
+    body = r.json()
+    return [v for k, v in body.items() if k.isdigit() and isinstance(v, dict)]
+
+
 def pesquisar(api_key: str, termo: str, limit: int = 30) -> list[dict]:
     """
     Pesquisa ao vivo na loja (parâmetro ?q=) e filtra para devolver SÓ os
@@ -120,21 +135,22 @@ def pesquisar(api_key: str, termo: str, limit: int = 30) -> list[dict]:
     palavras = _palavras_pesquisa(termo)
     if not palavras:
         return []
-    # A API pesquisa pela frase e devolve vazio para combinações que não existem
-    # tal-e-qual. Pesquisamos só pela palavra mais distintiva (a mais longa) e
-    # aplicamos o AND completo localmente sobre o nome.
-    termo_api = max(palavras, key=len)
-    r = requests.get(
-        f"{API_BASE}/product",
-        headers={"X-API-KEY": api_key},
-        params={"q": termo_api, "limit": 100},
-        timeout=15,
-    )
-    r.raise_for_status()
-    if not r.text.strip():
-        return []  # API devolveu corpo vazio (sem resultados)
-    body = r.json()
-    brutos = [v for k, v in body.items() if k.isdigit() and isinstance(v, dict)]
+
+    # A API pesquisa pela frase e limita resultados por palavra (uma palavra
+    # comum como "super" pode truncar e esconder "super shine"). Por isso
+    # consultamos por CADA palavra (as mais distintivas primeiro), juntamos os
+    # candidatos e aplicamos o AND localmente sobre o nome.
+    palavras_query = sorted(set(palavras), key=len, reverse=True)[:3]
+    brutos: list[dict] = []
+    ids_vistos: set = set()
+    for palavra in palavras_query:
+        for p in _query_api(api_key, palavra):
+            pid = p.get("id") or p.get("title")
+            if pid in ids_vistos:
+                continue
+            ids_vistos.add(pid)
+            brutos.append(p)
+
     resultados: list[dict] = []
     vistos: set[str] = set()
     for p in brutos:
