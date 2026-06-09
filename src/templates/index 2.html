@@ -109,8 +109,7 @@
   <div id="status-bar">
     <div id="status-dot"></div>
     <span id="status-txt">A carregar modelos…</span>
-    <button class="btn-secondary" id="btn-modo-edicao" onclick="toggleModoEdicao()" style="padding:5px 10px; font-size:.8rem; margin-left:12px;" title="Mostra um botão Corrigir em todas as linhas, incluindo as já reconhecidas">✎ Corrigir tudo</button>
-    <button class="btn-secondary" onclick="abrirSettings()" style="padding:5px 10px; font-size:.8rem; margin-left:6px;">⚙ Definições</button>
+    <button class="btn-secondary" onclick="abrirSettings()" style="padding:5px 10px; font-size:.8rem; margin-left:12px;">⚙ Definições</button>
     <a href="/logout" style="padding:5px 10px; font-size:.8rem; background:#37474f; color:#e0e0e0; border-radius:7px; text-decoration:none; margin-left:6px;">Sair</a>
   </div>
 </header>
@@ -193,25 +192,9 @@
 <script>
 let resultados = [];
 let modelosReady = false;
-let modoEdicao = false;  // quando ligado, todas as linhas (verdes incluídas) mostram "Corrigir"
-
-// Liga/desliga o modo edição e re-renderiza todas as linhas já na tabela.
-function toggleModoEdicao() {
-  modoEdicao = !modoEdicao;
-  const btn = document.getElementById('btn-modo-edicao');
-  btn.textContent = modoEdicao ? '✓ A corrigir tudo' : '✎ Corrigir tudo';
-  btn.classList.toggle('btn-primary', modoEdicao);
-  document.querySelectorAll('#tbody tr').forEach(tr => {
-    const row = tr._row;
-    if (!row) return;
-    if (row.produto) renderIdentificada(tr, row);
-    else renderNaoIdentificada(tr, row);
-  });
-}
 
 // ── Linhas não-identificadas (render + correção) ──────────────────
 function renderNaoIdentificada(tr, row) {
-  tr._row = row;
   const texto = (row.texto_origem || '').replace(/^linha \d+:\s*/, '').trim();
   const rotulo = row.inexistente
     ? `<span style="color:#ef9a9a;">⚠ Não existe na loja</span>`
@@ -224,20 +207,12 @@ function renderNaoIdentificada(tr, row) {
 }
 
 function renderIdentificada(tr, row) {
-  tr._row = row;
   const cls = row.score >= 0.95 ? 'score-high' : row.score >= 0.85 ? 'score-mid' : 'score-low';
-  const acao = modoEdicao
-    ? `<button class="btn-corrigir" type="button">Corrigir</button>`
-    : `<span style="color:#90caf9">${row.ficheiro || ''}</span>`;
   tr.innerHTML =
     `<td>${row.produto}</td>` +
     `<td class="qtd-cell" contenteditable="true" title="Clica para editar a quantidade">${row.qtd}</td>` +
     `<td class="${cls}">${row.score}</td>` +
-    `<td>${row.ref || ''}</td><td>${acao}</td>`;
-  if (modoEdicao) {
-    const texto = (row.texto_origem || row.produto || '').replace(/^linha \d+:\s*/, '').trim();
-    tr.querySelector('.btn-corrigir').onclick = () => abrirCorrecao(tr, texto, row);
-  }
+    `<td>${row.ref || ''}</td><td style="color:#90caf9">${row.ficheiro || ''}</td>`;
   const cel = tr.querySelector('.qtd-cell');
   const aplicar = () => {
     const n = parseInt(cel.textContent.replace(/\D/g, ''), 10);
@@ -251,11 +226,9 @@ function renderIdentificada(tr, row) {
 }
 
 function abrirCorrecao(tr, texto, row) {
-  // Reconstrói a linha inteira como uma única célula de edição. Agnóstico à origem:
-  // serve tanto para linhas não-identificadas (1 td + botão) como para linhas
-  // verdes (5 td), evitando layouts partidos ao entrar em correção.
-  tr.innerHTML = `<td colspan="5"></td>`;
   const td = tr.querySelector('td');
+  td.colSpan = 5;
+  tr.querySelector('.btn-corrigir').closest('td').remove();
   td.style.position = 'relative';
   const qtdInicial = (row.qtd && parseInt(row.qtd, 10) > 0) ? parseInt(row.qtd, 10) : 1;
   td.innerHTML =

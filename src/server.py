@@ -717,6 +717,20 @@ def _aplicar_aliases_aprendidos() -> None:
             _pipeline[campo] = {**base, **efetivos}
 
 
+def _carregar_catalogo_loja() -> tuple[list, dict] | None:
+    """
+    Catálogo completo da Shopkit em RAM (uma chamada no arranque). É a fonte de
+    produtos quando há SHOPKIT_API_KEY — substitui o prod.pkl. Devolve (nomes,
+    sku_map) ou None se não houver key. Salvaguarda em disco gerida pela própria
+    shopkit_api (usada se a loja estiver indisponível).
+    """
+    shop_key = os.environ.get("SHOPKIT_API_KEY")
+    if not shop_key:
+        return None
+    import shopkit_api
+    return shopkit_api.carregar_catalogo(shop_key)
+
+
 def _load_pipeline():
     global _pipeline
     from dotenv import load_dotenv
@@ -724,15 +738,43 @@ def _load_pipeline():
 
     api_key = os.environ.get("ANTHROPIC_API_KEY")
 
+    # Fonte do catálogo: a Shopkit (uma chamada no arranque) quando há key; o
+    # catálogo local (.pkl/ai_pipeline.load_produtos) só entra se a loja não estiver
+    # configurada. A pasta data/ deixa de ser fonte que se mantém à mão.
+    catalogo_loja = _carregar_catalogo_loja()
+
     if IS_CLOUD:
         import anthropic
         import ai_pipeline as ai_pl
         client = anthropic.Anthropic(api_key=api_key)
-        produtos, sku_map, aliases, exemplos = ai_pl.load_produtos(_BUNDLE / "data")
+        prod_local, sku_local, aliases, exemplos = ai_pl.load_produtos(_BUNDLE / "data")
+        produtos, sku_map = catalogo_loja if catalogo_loja else (prod_local, sku_local)
         _pipeline = {"pl": ai_pl, "ai_pl": ai_pl, "produtos": produtos, "emb_prod": None,
                      "sku_map": sku_map, "aliases": aliases, "exemplos": exemplos, "ai_client": client}
+    elif catalogo_loja or not (_BUNDLE / "data" / "prod.pkl").exists():
+        # Sem pipeline ML local: o catálogo vem da loja e o ai_pipeline trata texto e
+        # imagem (rapidfuzz + regras + Claude sobre o catálogo em RAM). Sem embeddings.
+        if not api_key:
+            raise RuntimeError(
+                "Este modo requer ANTHROPIC_API_KEY definida — sem Claude não há "
+                "como fazer o matching dos produtos."
+            )
+        import anthropic
+        import ai_pipeline as ai_pl
+        client = anthropic.Anthropic(api_key=api_key)
+        _, sku_local, aliases, exemplos = ai_pl.load_produtos(_BUNDLE / "data")
+        if catalogo_loja:
+            produtos, sku_map = catalogo_loja
+            print(f"[pipeline] Catálogo da loja em RAM: {len(produtos)} produtos (data/ não é fonte).")
+        else:
+            produtos, sku_map = [], sku_local
+            print("[pipeline] Sem catálogo da loja nem prod.pkl: a depender de aliases/SKUs.")
+        _pipeline = {"pl": ai_pl, "ai_pl": ai_pl, "produtos": produtos, "emb_prod": None,
+                     "sku_map": sku_map, "aliases": aliases, "exemplos": exemplos,
+                     "ai_client": client,
+                     "ai_produtos": produtos, "ai_sku_map": sku_map, "ai_aliases": aliases}
     else:
-        # Local: pipeline ML para imagens (EasyOCR + embeddings)
+        # Local com pipeline ML para imagens (EasyOCR + embeddings) a partir do .pkl.
         import pipeline as pl
         produtos, emb_prod, sku_map, freq_palavras, palavras_unicas, aliases = pl.load_produtos()
         _pipeline = {"pl": pl, "produtos": produtos, "emb_prod": emb_prod,
@@ -925,27 +967,52 @@ def _cache_pesquisa_guardar(chave: str, agora: float, resultados: list) -> None:
         _CACHE_PESQUISA.popitem(last=False)  # descarta a mais antiga (LRU)
 
 
+def _pesquisar_shopkit_cached(termo: str) -> list[dict] | None:
+    """
+    Pesquisa um termo na Shopkit, com a mesma cache LRU do endpoint /pesquisar_produto.
+    Devolve list[{produto, ref}] (possivelmente vazia) ou None em erro/sem API key.
+    O chamador (ai_pipeline) usa o .pkl como fallback sempre que não houver
+    candidatos da loja — quer por erro (None), quer por 0 resultados ([]), já que
+    a pesquisa AND da loja não apanha sinónimos/abreviações ('clear'→'transparente').
+    """
+    termo = (termo or "").strip()
+    # A linha chega com a quantidade à frente ("12 super primer"). Esse número não
+    # faz parte do nome e, no filtro AND da Shopkit, eliminaria todos os resultados.
+    # Tira-se só o número INICIAL — números internos do nome ("like gel 139",
+    # "lâmpada 90") são preservados.
+    termo = re.sub(r"^\s*\d+\s*[-.)x]?\s*", "", termo, flags=re.IGNORECASE).strip()
+    api_key = os.environ.get("SHOPKIT_API_KEY")
+    if not (api_key and termo):
+        return None
+    chave = _normalizar_token(termo)
+    agora = time.time()
+    em_cache = _CACHE_PESQUISA.get(chave)
+    if em_cache and agora - em_cache[0] < _CACHE_PESQUISA_TTL:
+        _CACHE_PESQUISA.move_to_end(chave)
+        return em_cache[1]
+    try:
+        import shopkit_api
+        resultados = shopkit_api.pesquisar(api_key, termo)
+        _cache_pesquisa_guardar(chave, agora, resultados)
+        return resultados
+    except Exception as e:
+        print(f"[shopkit] pesquisa falhou para {termo!r} ({e}); fallback local.")
+        return None
+
+
 @app.route("/pesquisar_produto")
 @login_required
 def pesquisar_produto():
-    """Pesquisa ao vivo na loja Shopkit (com cache LRU 10 min e fallback local)."""
+    """
+    Pesquisa para o seletor 'Corrigir'. Usa a Shopkit como fonte (mesma lógica e
+    cache do pipeline, via _pesquisar_shopkit_cached: limpa a quantidade inicial),
+    e cai no catálogo local (.pkl) quando a loja não dá candidatos — por erro
+    (None) ou por 0 resultados ([]) — para a colega ver sempre opções.
+    """
     termo = (request.args.get("q") or "").strip()
-    chave = _normalizar_token(termo)
-    api_key = os.environ.get("SHOPKIT_API_KEY")
-
-    if api_key and termo:
-        agora = time.time()
-        em_cache = _CACHE_PESQUISA.get(chave)
-        if em_cache and agora - em_cache[0] < _CACHE_PESQUISA_TTL:
-            _CACHE_PESQUISA.move_to_end(chave)  # acesso recente
-            return jsonify({"fonte": "cache", "produtos": em_cache[1]})
-        try:
-            import shopkit_api
-            resultados = shopkit_api.pesquisar(api_key, termo)
-            _cache_pesquisa_guardar(chave, agora, resultados)
-            return jsonify({"fonte": "api", "produtos": resultados})
-        except Exception as e:
-            print(f"[pesquisar_produto] API falhou ({e}); fallback local.")
+    resultados = _pesquisar_shopkit_cached(termo)
+    if resultados:
+        return jsonify({"fonte": "api", "produtos": resultados})
     return jsonify({"fonte": "local", "produtos": _pesquisar_local(termo)})
 
 
@@ -1040,6 +1107,7 @@ def processar():
                     score   = row[1]
                     qty     = row[2]
                     ai_idx  = row[3] if len(row) > 3 else None
+                    ai_ref  = row[4] if len(row) > 4 else ""
                     if ai_idx and 1 <= ai_idx <= len(linhas_img):
                         linha_idx  = ai_idx
                         texto_orig = f"linha {ai_idx}: {linhas_img[ai_idx - 1]}"
@@ -1051,7 +1119,7 @@ def processar():
                         "produto":      produto,
                         "qtd":          qty,
                         "score":        round(score, 3),
-                        "ref":          pl["sku_map"].get(produto, ""),
+                        "ref":          ai_ref or pl["sku_map"].get(produto, ""),
                         "texto_origem": texto_orig,
                         "_linha_idx":   linha_idx,
                     })
@@ -1159,11 +1227,13 @@ def processar_texto():
             raw_rows: list[tuple] = []
             batch_errors: list[str] = []
             with ThreadPoolExecutor(max_workers=min(len(batches), max_workers)) as pool:
+                # Candidatos via rapidfuzz sobre prods_t (o catálogo da loja em RAM,
+                # ou o .pkl quando não há Shopkit).
                 futs = {
                     pool.submit(
                         ai_pl.processar_texto,
                         "\n".join(b),
-                        prods_t, sku_t, aliases_t, ai_client, exemplos_t
+                        prods_t, sku_t, aliases_t, ai_client, exemplos_t,
                     ): b
                     for b in batches
                 }
@@ -1188,6 +1258,7 @@ def processar_texto():
             for p, (row, b) in melhor.items():
                 _, s, q = row[0], row[1], row[2]
                 ai_linha_idx = row[3] if len(row) > 3 else None
+                ai_ref = row[4] if len(row) > 4 else ""
                 if ai_linha_idx and 1 <= ai_linha_idx <= len(linhas):
                     linha_idx = ai_linha_idx
                     texto_orig = f"linha {ai_linha_idx}: {linhas[ai_linha_idx - 1]}"
@@ -1200,7 +1271,7 @@ def processar_texto():
                     "produto":      p,
                     "qtd":          q,
                     "score":        round(s, 3),
-                    "ref":          sku_final.get(p, ""),
+                    "ref":          ai_ref or sku_final.get(p, ""),
                     "texto_origem": texto_orig,
                     "_linha_idx":   linha_idx,
                 })

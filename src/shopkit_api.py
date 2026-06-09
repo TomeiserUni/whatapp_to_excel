@@ -204,6 +204,56 @@ def extrair_para_catalogo(produtos_api: list[dict]) -> tuple[list[str], dict[str
     return nomes, sku_map, meta
 
 
+_CACHE_CATALOGO = DATA_DIR / "catalogo_cache.json"
+
+
+def _guardar_cache(nomes: list[str], sku_map: dict[str, str]) -> None:
+    """Salvaguarda do último catálogo bem-sucedido (gerida pelo programa)."""
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        with open(_CACHE_CATALOGO, "w", encoding="utf-8") as f:
+            json.dump({"nomes": nomes, "sku_map": sku_map}, f, ensure_ascii=False)
+    except Exception as e:
+        print(f"[shopkit] não consegui gravar cache do catálogo: {e}")
+
+
+def _ler_cache() -> tuple[list[str], dict[str, str]] | None:
+    try:
+        with open(_CACHE_CATALOGO, encoding="utf-8") as f:
+            d = json.load(f)
+        return d.get("nomes", []), d.get("sku_map", {})
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        print(f"[shopkit] cache do catálogo ilegível: {e}")
+        return None
+
+
+def carregar_catalogo(api_key: str) -> tuple[list[str], dict[str, str]]:
+    """
+    Catálogo completo da loja em runtime: uma chamada à API (fetch_todos), sem
+    depender de ficheiros .pkl. Em sucesso, atualiza a cache em disco. Se a loja
+    estiver indisponível, recorre à cache do último arranque bem-sucedido.
+    Devolve (nomes, sku_map). Levanta RuntimeError se não houver API nem cache.
+    """
+    try:
+        brutos = fetch_todos(api_key)
+        nomes, sku_map, _meta = extrair_para_catalogo(brutos)
+        if nomes:
+            _guardar_cache(nomes, sku_map)
+            print(f"[shopkit] catálogo carregado da loja: {len(nomes)} produtos.")
+            return nomes, sku_map
+        print("[shopkit] loja devolveu catálogo vazio; a tentar cache local.")
+    except Exception as e:
+        print(f"[shopkit] falha ao obter catálogo da loja ({e}); a tentar cache local.")
+
+    cache = _ler_cache()
+    if cache is not None:
+        print(f"[shopkit] catálogo lido da cache: {len(cache[0])} produtos.")
+        return cache
+    raise RuntimeError("Sem catálogo: loja indisponível e sem cache local.")
+
+
 def guardar(nomes: list[str], sku_map: dict[str, str], meta: dict[str, dict]) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     with open(DATA_DIR / "prod.pkl", "wb") as f:
