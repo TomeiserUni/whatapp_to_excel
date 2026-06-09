@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: whatapp-excel
+    runtime: docker
+    plan: free
+    healthCheckPath: /status
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: SHOPKIT_API_KEY
+        sync: false
+      - key: SECRET_KEY
+        generateValue: true
+      # Opcional: APP_USERNAME + APP_PASSWORD para proteger o acesso.

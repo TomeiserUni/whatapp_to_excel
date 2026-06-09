@@ -3,3 +3,9 @@ __pycache__
 .vscode
 .env
 data/nao_reconhecidas.jsonl
+# Lixo do macOS e duplicados de cópia (" 2.txt", etc.)
+.DS_Store
+**/.DS_Store
+* 2.*
+# Cache do catálogo Shopkit — gerada em runtime, não versionar
+data/catalogo_cache.json

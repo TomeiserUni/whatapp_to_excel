@@ -888,8 +888,9 @@ def index():
 
 
 @app.route("/status")
-@login_required
 def status():
+    # Sem login_required: é o healthcheck do Render e só revela se o pipeline
+    # carregou (booleano), não expõe dados sensíveis.
     return jsonify({"ready": _pipeline is not None})
 
 
