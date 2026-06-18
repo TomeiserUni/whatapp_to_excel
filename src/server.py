@@ -61,9 +61,18 @@ def _gravar_alias_aprendido(chave: str, produto: str) -> None:
 
 
 def _normalizar_para_tendencia(linha: str) -> str:
-    """Linha sem quantidade/pontuação, minúsculas — agrupa variações do mesmo erro."""
-    s = re.sub(r"^\s*\d+\s*[-.)]?\s*", "", linha.lower())  # tira "4- " inicial
-    s = re.sub(r"[^\w\s]", " ", s)
+    """
+    Linha sem quantidade/pontuação, minúsculas — agrupa variações do mesmo erro
+    e dá chaves de alias estáveis (independentes da quantidade da encomenda).
+
+    Remove números E palavras de unidade em QUALQUER posição: "super mãe 12
+    unidades", "12 super mãe" e "super mãe" colapsam todas em "super mae".
+    Caso contrário um alias aprendido ficava colado à quantidade daquele pedido
+    e só voltava a disparar com exatamente o mesmo número.
+    """
+    s = re.sub(r"[^\w\s]", " ", linha.lower())              # pontuação → espaço
+    s = re.sub(r"\b(?:unidades?|un|pcs?|cada)\b", " ", s)   # palavras de unidade
+    s = re.sub(r"\b\d+\b", " ", s)                          # quantidades (qq posição)
     return re.sub(r"\s+", " ", s).strip()
 
 
@@ -977,11 +986,18 @@ def _pesquisar_shopkit_cached(termo: str) -> list[dict] | None:
     a pesquisa AND da loja não apanha sinónimos/abreviações ('clear'→'transparente').
     """
     termo = (termo or "").strip()
-    # A linha chega com a quantidade à frente ("12 super primer"). Esse número não
-    # faz parte do nome e, no filtro AND da Shopkit, eliminaria todos os resultados.
-    # Tira-se só o número INICIAL — números internos do nome ("like gel 139",
-    # "lâmpada 90") são preservados.
+    # A quantidade não faz parte do nome e, no filtro AND da Shopkit, eliminaria
+    # todos os resultados. Tira-se:
+    #   1) o número INICIAL ("12 super primer" → "super primer");
+    #   2) "número + unidade" em qualquer posição ("super mãe 12 unidades" →
+    #      "super mãe"; "cola 3 un" → "cola").
+    # Números internos do nome SEM unidade a seguir são preservados ("like gel
+    # 139", "lâmpada 90"), porque aí o número é distintivo, não uma quantidade.
     termo = re.sub(r"^\s*\d+\s*[-.)x]?\s*", "", termo, flags=re.IGNORECASE).strip()
+    termo = re.sub(
+        r"\b\d+\s*(?:unidades?|un|pcs?|cada)\b", " ", termo, flags=re.IGNORECASE
+    )
+    termo = re.sub(r"\s+", " ", termo).strip()
     api_key = os.environ.get("SHOPKIT_API_KEY")
     if not (api_key and termo):
         return None

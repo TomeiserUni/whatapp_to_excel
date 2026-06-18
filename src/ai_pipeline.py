@@ -2,9 +2,56 @@ import base64
 import json
 import pickle
 import re
+import unicodedata
 from pathlib import Path
 
 from rapidfuzz import fuzz, process
+
+
+def _chave_nome(nome: str) -> str:
+    """
+    Chave canónica para comparar nomes de produto entre fontes (aliases escritos
+    à mão vs. catálogo da Shopkit): minúsculas, sem acentos, pontuação tornada
+    espaço e espaços colapsados. Faz 'desidrat - desidratante' == 'desidrat
+    desidratante' e 'esfoliante | grão grosso' == 'esfoliante grao grosso'.
+    """
+    sem_acentos = "".join(
+        c for c in unicodedata.normalize("NFD", (nome or "").lower())
+        if unicodedata.category(c) != "Mn"
+    )
+    return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", sem_acentos)).strip()
+
+
+def _alias_no_texto(alias: str, texto_chave: str) -> bool:
+    r"""
+    True se o ``alias`` aparece em ``texto_chave`` (ambos já passados por
+    _chave_nome), tolerante a espaços/pontuação dentro do termo: '3d' apanha
+    '3 d' e vice-versa, mantendo fronteiras de palavra (não dispara em
+    'abc3def'). Constrói-se um padrão a partir dos caracteres do alias (sem
+    espaços), com \s* opcional entre eles, ancorado em fronteiras de palavra.
+    """
+    alias = alias.strip()
+    if not alias:
+        return False
+    # \s* opcional só onde faz sentido: onde o alias já tinha espaço (entre
+    # tokens) e nas transições dígito↔letra ('3d'↔'3 d'). NÃO entre dígitos
+    # seguidos, para '104' não disparar em '1 0 4'.
+    partes: list[str] = []
+    anterior = ""
+    for c in alias:
+        if c == " ":
+            anterior = " "
+            continue
+        if anterior and anterior != " " and (anterior.isdigit() == c.isdigit()):
+            sep = ""              # mesmo tipo, sem espaço original → colado
+        elif anterior:
+            sep = r"\s*"          # fronteira de token ou dígito↔letra
+        else:
+            sep = ""              # primeiro caráter
+        partes.append(sep + re.escape(c))
+        anterior = c
+    padrao = r"\b" + "".join(partes) + r"\b"
+    return re.search(padrao, texto_chave) is not None
 
 
 def load_produtos(data_dir: Path):
@@ -75,6 +122,23 @@ def _normalizar_linha(linha: str) -> str:
     for orig, sub in _SINONIMOS.items():
         linha = re.sub(rf'\b{orig}\b', sub, linha, flags=re.IGNORECASE)
     return linha
+
+
+def _linha_sem_quantidade(linha: str) -> str:
+    """
+    Linha sem a quantidade da encomenda, para pontuar candidatos no fuzzy.
+    'super mãe 12 unidades' dilui o token_set_ratio do produto certo (cai de
+    100 para ~60); tirar '12 unidades' devolve a linha à forma que o fuzzy
+    apanha bem ('super mãe' → 'verniz gel super mãe maria' a 100).
+
+    Só se remove 'número + unidade' (12 unidades, 3 un, 6 pcs) e palavras de
+    unidade soltas. Números SEM unidade são preservados, porque podem ser
+    distintivos do nome ('like gel 104', 'broca 13', 'lâmpada 90').
+    """
+    s = re.sub(r"\b\d+\s*(?:unidades?|un|pcs?|cada)\b", " ", linha, flags=re.IGNORECASE)
+    s = re.sub(r"\b(?:unidades?|un|pcs?|cada)\b", " ", s, flags=re.IGNORECASE)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s or linha  # nunca devolver vazio (linhas que são só quantidade)
 
 
 def _linhas_com_indices(texto: str) -> list[tuple[int, str]]:
@@ -228,7 +292,7 @@ def processar_texto(
 
     def _candidatos_rapidfuzz(linha: str) -> None:
         """Fallback local: pontua candidatos do catálogo .pkl para uma linha."""
-        linha_norm = _normalizar_linha(linha)
+        linha_norm = _normalizar_linha(_linha_sem_quantidade(linha))
         for produto, score, *_ in process.extract(linha_norm, produtos, scorer=fuzz.token_set_ratio, limit=20):
             candidatos_score[produto] = max(candidatos_score.get(produto, 0), score)
         linha_low = _normalizar_linha(linha.lower())
@@ -262,13 +326,27 @@ def processar_texto(
                 sku_map[nome] = ref
 
     # Aliases diretos têm sempre prioridade — garante que entram no catálogo.
-    # Com a Shopkit como fonte, o produto-alvo pode não estar na lista local: aceita-o
-    # se já for candidato (veio da loja) ou se constar do catálogo .pkl.
+    # O alvo do alias é escrito à mão e pode diferir do nome da loja em pontuação,
+    # acentos ou espaços (ex.: 'desidrat desidratante' vs 'desidrat - desidratante').
+    # Resolvemo-lo contra o nome REAL do catálogo por chave canónica, em vez de exigir
+    # igualdade exata — senão o alias é silenciosamente ignorado.
+    # Produtos cujo nome não partilha palavras com o termo escrito pelo cliente
+    # (ex.: alias 'top coat 3d' → 'top coat tempered'). A prova de que não é
+    # alucinação é o alias ter disparado, não a palavra do produto na linha —
+    # por isso isentamo-los do filtro anti-alucinação mais abaixo.
+    produtos_via_alias: set[str] = set()
     if aliases:
-        texto_lower = texto.lower()
+        texto_chave = _chave_nome(texto)
+        por_chave = {_chave_nome(p): p for p in candidatos_score}
+        for p in produtos:
+            por_chave.setdefault(_chave_nome(p), p)
         for alias, produto in aliases.items():
-            if alias.lower() in texto_lower and (produto in candidatos_score or produto in produtos):
-                candidatos_score[produto] = max(candidatos_score.get(produto, 0), 100)
+            if not _alias_no_texto(_chave_nome(alias), texto_chave):
+                continue
+            real = por_chave.get(_chave_nome(produto))
+            if real:
+                candidatos_score[real] = max(candidatos_score.get(real, 0), 100)
+                produtos_via_alias.add(real)
 
     cap = max(60, min(len(linhas) * 8, 180))
     candidatos = [
@@ -308,6 +386,10 @@ def processar_texto(
         "Se houver dois candidatos próximos (ex: 'rosa' pode ser 'rosa pop' ou 'rosa sakura'), "
         "NÃO escolhas — ignora.\n"
         "• Ordem de palavras trocada: 'top coat like gel' = 'like gel top coat'. Aceita.\n"
+        "• Ordem trocada E typo ao mesmo tempo contam como UMA só imperfeição combinada — "
+        "aceita à mesma se sobrar UM candidato claro. Ex: 'base gummy tranparente' = "
+        "'gummy base transparente' (palavras trocadas + falta o 's'); a cor 'transparente' "
+        "está escrita, logo distingue de 'gummy base nude'/'gummy base rosa claro'.\n"
         "• Números aproximados (potência/volume): se o cliente pede um número que não existe "
         "no catálogo MAS existe UM produto da mesma categoria com número próximo, devolve "
         "esse. Ex: 'lâmpada LED 99W' → 'lâmpada 90W' (única que existe). "
@@ -356,8 +438,10 @@ def processar_texto(
         linha_idx = int(raw_idx) if raw_idx is not None else None
 
         # Validação anti-alucinação: o nome distintivo tem de aparecer na linha apontada,
-        # excepto se a linha for um padrão "de cada" (que expande várias variantes).
-        if linha_idx is not None and linha_idx in linha_por_idx:
+        # excepto se a linha for um padrão "de cada" (que expande várias variantes) ou
+        # se o produto veio de um alias acionado (o termo do cliente justifica-o, mesmo
+        # que não partilhe palavras com o nome do catálogo — ex.: '3 d' → 'tempered').
+        if linha_idx is not None and linha_idx in linha_por_idx and produto_real not in produtos_via_alias:
             linha_texto = linha_por_idx[linha_idx]
             if "de cada" not in linha_texto.lower():
                 if not _produto_referenciado_na_linha(produto_real, linha_texto, genericas):
@@ -371,13 +455,18 @@ def processar_texto(
     return resultados
 
 
+# Palavras estruturais: tipo de produto, unidades e ligações. São sempre ruído
+# (o cliente quase nunca as escreve), independentemente da frequência no catálogo.
+_PALAVRAS_ESTRUTURAIS = {
+    "verniz", "gel", "normal", "base", "top", "coat", "ml", "g", "gr",
+    "unidade", "unidades", "un", "pcs", "cada", "de", "da", "do", "com",
+    "para", "e", "natura", "pop", "kit",
+}
+
+
 def _palavras_genericas(produtos: list[str]) -> set[str]:
     """Tokens que aparecem em muitos produtos — não identificam variantes específicas."""
-    base = {
-        "verniz", "gel", "normal", "base", "top", "coat", "ml", "g", "gr",
-        "unidade", "unidades", "un", "pcs", "cada", "de", "da", "do", "com",
-        "para", "e", "natura", "pop", "kit", "para",
-    }
+    base = set(_PALAVRAS_ESTRUTURAIS)
     contagem: dict[str, int] = {}
     for p in produtos:
         for t in re.findall(r"\w+", p.lower()):
@@ -404,7 +493,26 @@ def _produto_referenciado_na_linha(produto: str, linha: str, genericas: set[str]
     distintivas_num  = [t for t in palavras_produto if not t.isalpha() and any(c.isdigit() for c in t)]
 
     if not distintivas_alfa and not distintivas_num:
-        return fuzz.token_set_ratio(produto.lower(), linha_norm) >= 80
+        # Todas as palavras do produto foram marcadas genéricas (acontece quando
+        # os candidatos de uma linha são poucos e parecidos — 'maria ...' ou
+        # 'gummy base ...' — inflando o que conta como 'genérico'). Caímos para
+        # as palavras essenciais (sem estruturais) e exigimos que TODAS apareçam
+        # na linha, com tolerância a typo por palavra (não token_set_ratio sobre
+        # a frase, que colapsa com um único typo numa palavra longa, p.ex.
+        # 'transparente' vs 'tranparente').
+        essenciais = [
+            t for t in re.findall(r"\w+", produto.lower())
+            if t not in _PALAVRAS_ESTRUTURAIS and len(t) >= 3
+        ]
+        if not essenciais:
+            return fuzz.token_set_ratio(produto.lower(), linha_norm) >= 80
+        for e in essenciais:
+            if e in linha_tokens:
+                continue
+            if any(len(t) >= 3 and fuzz.ratio(e, t) >= 80 for t in linha_tokens):
+                continue
+            return False  # falta uma palavra essencial → não está nesta linha
+        return True
 
     # Palavras alfabéticas: match exato OU typo (≥65) OU substring (abreviação)
     for d in distintivas_alfa:
