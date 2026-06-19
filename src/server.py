@@ -434,10 +434,19 @@ def _expandir_aliases_diretos(linhas: list[str], aliases: dict, sku_map: dict) -
                 if len(extra) >= 2:
                     continue  # linha tem contexto a mais → deixa a AI decidir
 
-            # Quantidade só do segmento até ao fim do alias (a qty vem antes do
-            # produto: "2 like gel 104"); números depois do alias pertencem a
-            # outros produtos da linha. Os do próprio alias são identificadores.
-            segmento = linha_norm[:m_alias.end()]
+            # Quantidade do segmento até ao fim do alias (a qty costuma vir antes
+            # do produto: "2 like gel 104"); números depois do alias pertencem a
+            # outros produtos da linha. EXCEÇÃO: uma qty com unidade explícita logo
+            # a seguir ao alias é a quantidade deste produto ("super mãe 12 unidades"
+            # → 12), por isso estende-se o segmento para a incluir.
+            fim = m_alias.end()
+            m_qty_pos = re.match(
+                r"\s*(\d+)\s*(?:unidades?|un|pcs?|cada)\b",
+                linha_norm[fim:], flags=re.IGNORECASE,
+            )
+            if m_qty_pos:
+                fim += m_qty_pos.end()
+            segmento = linha_norm[:fim]
             nums_alias = set(re.findall(r"\d+", alias_norm))
             resultados.append({
                 "ficheiro":     "texto colado",
@@ -1243,14 +1252,19 @@ def processar_texto():
 
             raw_rows: list[tuple] = []
             batch_errors: list[str] = []
+            # Fonte dos candidatos: a pesquisa Shopkit ao vivo (limpa a quantidade
+            # e devolve o nome exato da loja). Em falha/sem key cai no rapidfuzz
+            # sobre prods_t. Sem isto, linhas como "Super mãe 12 unidades" davam
+            # candidatos ambíguos no fuzzy (vários produtos com "mãe" empatados a
+            # 50) e a AI, sem candidato único, ignorava a linha.
+            buscar = _pesquisar_shopkit_cached if os.environ.get("SHOPKIT_API_KEY") else None
             with ThreadPoolExecutor(max_workers=min(len(batches), max_workers)) as pool:
-                # Candidatos via rapidfuzz sobre prods_t (o catálogo da loja em RAM,
-                # ou o .pkl quando não há Shopkit).
                 futs = {
                     pool.submit(
                         ai_pl.processar_texto,
                         "\n".join(b),
                         prods_t, sku_t, aliases_t, ai_client, exemplos_t,
+                        buscar,
                     ): b
                     for b in batches
                 }
