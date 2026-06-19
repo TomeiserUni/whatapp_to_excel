@@ -108,13 +108,24 @@ def _palavras_pesquisa(termo: str) -> list[str]:
 
 
 def _query_api(api_key: str, palavra: str) -> list[dict]:
-    """Uma query ?q= à loja; devolve os produtos brutos (dicts) dessa palavra."""
-    r = requests.get(
-        f"{API_BASE}/product",
-        headers={"X-API-KEY": api_key},
-        params={"q": palavra, "limit": 100},
-        timeout=15,
-    )
+    """
+    Uma query ?q= à loja; devolve os produtos brutos (dicts) dessa palavra.
+    Com retry/backoff em 429 (Too Many Requests): numa encomenda grande há muitas
+    pesquisas seguidas e a Shopkit limita o ritmo; em vez de falhar a linha,
+    espera-se um pouco e tenta-se de novo (até 3 vezes).
+    """
+    for tentativa in range(3):
+        r = requests.get(
+            f"{API_BASE}/product",
+            headers={"X-API-KEY": api_key},
+            params={"q": palavra, "limit": 100},
+            timeout=15,
+        )
+        if r.status_code == 429 and tentativa < 2:
+            espera = float(r.headers.get("Retry-After", 0)) or (0.5 * (tentativa + 1))
+            time.sleep(espera)
+            continue
+        break
     r.raise_for_status()
     if not r.text.strip():
         return []
@@ -166,6 +177,28 @@ def pesquisar(api_key: str, termo: str, limit: int = 30) -> list[dict]:
         resultados.append({"produto": nome, "ref": (p.get("reference") or "").strip()})
         if len(resultados) >= limit:
             break
+    return resultados
+
+
+def pesquisar_em_catalogo(termo: str, nomes: list[str], sku_map: dict,
+                          limit: int = 30) -> list[dict]:
+    """
+    Mesma filtragem AND da ``pesquisar`` (todas as palavras do termo no nome,
+    sem acentos), mas sobre o catálogo já em RAM — SEM bater na API. Usada como
+    fonte de candidatos por linha no processamento: evita uma chamada Shopkit por
+    linha (e o 429 daí resultante), já que o catálogo completo foi carregado no
+    arranque. Os ``nomes`` já vêm normalizados (mesmo formato de _normalizar_nome).
+    """
+    palavras = _palavras_pesquisa(termo or "")
+    if not palavras:
+        return []
+    resultados: list[dict] = []
+    for nome in nomes:
+        nome_sa = _sem_acentos(nome)
+        if all(palavra in nome_sa for palavra in palavras):
+            resultados.append({"produto": nome, "ref": (sku_map.get(nome) or "").strip()})
+            if len(resultados) >= limit:
+                break
     return resultados
 
 

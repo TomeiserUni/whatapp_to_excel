@@ -43,6 +43,11 @@ _LOG_NAO_RECONHECIDAS = _USER_DIR / "data" / "nao_reconhecidas.jsonl"
 # separado do aliases.json curado à mão; é fundido por cima ao carregar.
 _ALIASES_APRENDIDOS = _USER_DIR / "data" / "aliases_aprendidos.json"
 
+# Palavras de unidade que o cliente escreve a seguir à quantidade ("12 unidades",
+# "6 un", "3 pcs"). 'unid\w*' tolera os typos frequentes do WhatsApp ('unidases',
+# 'unidaees', 'unidde'…) — qualquer palavra começada por 'unid' conta como unidade.
+_UNIDADES_RE = r"(?:unid\w*|un|und|pcs?|cada)"
+
 
 def _carregar_aliases_aprendidos() -> dict:
     try:
@@ -71,7 +76,7 @@ def _normalizar_para_tendencia(linha: str) -> str:
     e só voltava a disparar com exatamente o mesmo número.
     """
     s = re.sub(r"[^\w\s]", " ", linha.lower())              # pontuação → espaço
-    s = re.sub(r"\b(?:unidades?|un|pcs?|cada)\b", " ", s)   # palavras de unidade
+    s = re.sub(rf"\b{_UNIDADES_RE}\b", " ", s)              # palavras de unidade
     s = re.sub(r"\b\d+\b", " ", s)                          # quantidades (qq posição)
     return re.sub(r"\s+", " ", s).strip()
 
@@ -133,7 +138,7 @@ _GENERICOS_SO_CONTEXTO = {
 def _linha_so_contexto(linha: str) -> bool:
     lower = linha.lower().strip()
     lower_sem_qtd = re.sub(r"\b\d+\b", "", lower)
-    lower_sem_qtd = re.sub(r"\b(?:unidades?|un|pcs?|cada)\b", "", lower_sem_qtd)
+    lower_sem_qtd = re.sub(rf"\b{_UNIDADES_RE}\b", "", lower_sem_qtd)
     # remove pontuação/hífens soltos (ex: "4- verniz gel cateye" → "verniz gel cateye")
     lower_sem_qtd = re.sub(r"[^\w\s]", " ", lower_sem_qtd)
     lower_sem_qtd = re.sub(r"\s+", " ", lower_sem_qtd).strip()
@@ -263,7 +268,7 @@ def _quantidade_linha(linha: str, ignorar: set[str] | None = None) -> int:
     a quantidade é o 6).
     """
     ignorar = ignorar or set()
-    m = re.search(r"\b(\d+)\s*(?:unidades?|un|und|pcs?)\b", linha, re.IGNORECASE)
+    m = re.search(rf"\b(\d+)\s*{_UNIDADES_RE}\b", linha, re.IGNORECASE)
     if m:
         return int(m.group(1))
     m = re.search(r"\bx\s*(\d+)\b|\b(\d+)\s*x\b", linha, re.IGNORECASE)
@@ -287,7 +292,7 @@ def _token_e_quantidade(linha: str, match: re.Match) -> bool:
     after = linha[match.end():match.end() + 12]
     before = linha[max(0, match.start() - 2):match.start()]
     return bool(
-        re.match(r"\s*(?:unidades?|un|und|pcs?|cada)\b", after, re.IGNORECASE)
+        re.match(rf"\s*{_UNIDADES_RE}\b", after, re.IGNORECASE)
         or re.search(r"x\s*$", before, re.IGNORECASE)
     )
 
@@ -434,24 +439,25 @@ def _expandir_aliases_diretos(linhas: list[str], aliases: dict, sku_map: dict) -
                 if len(extra) >= 2:
                     continue  # linha tem contexto a mais → deixa a AI decidir
 
-            # Quantidade do segmento até ao fim do alias (a qty costuma vir antes
-            # do produto: "2 like gel 104"); números depois do alias pertencem a
-            # outros produtos da linha. EXCEÇÃO: uma qty com unidade explícita logo
-            # a seguir ao alias é a quantidade deste produto ("super mãe 12 unidades"
-            # → 12), por isso estende-se o segmento para a incluir.
-            fim = m_alias.end()
-            m_qty_pos = re.match(
-                r"\s*(\d+)\s*(?:unidades?|un|pcs?|cada)\b",
-                linha_norm[fim:], flags=re.IGNORECASE,
-            )
-            if m_qty_pos:
-                fim += m_qty_pos.end()
-            segmento = linha_norm[:fim]
+            # Quantidade do produto. Uma qty com unidade EXPLÍCITA na linha
+            # ("12 unidades", "6 un") é a quantidade deste produto, esteja onde
+            # estiver — o alias pode vir antes dela com palavras pelo meio
+            # ("gloss top coat 12 unidades" → 12; "super mãe 12 unidades" → 12).
+            # Sem unidade explícita, restringe-se ao segmento até ao fim do alias
+            # (a qty costuma vir antes: "2 like gel 104"); números soltos depois
+            # pertencem a outros produtos da linha.
             nums_alias = set(re.findall(r"\d+", alias_norm))
+            m_qty_unidade = re.search(
+                rf"\b(\d+)\s*{_UNIDADES_RE}\b", linha_norm, flags=re.IGNORECASE,
+            )
+            if m_qty_unidade and m_qty_unidade.group(1) not in nums_alias:
+                qtd = int(m_qty_unidade.group(1))
+            else:
+                qtd = _quantidade_linha(linha_norm[:m_alias.end()], ignorar=nums_alias)
             resultados.append({
                 "ficheiro":     "texto colado",
                 "produto":      produto,
-                "qtd":          _quantidade_linha(segmento, ignorar=nums_alias),
+                "qtd":          qtd,
                 "score":        1.0,
                 "ref":          sku_map.get(produto, ""),
                 "texto_origem": f"linha {idx}: {linha}",
@@ -986,27 +992,49 @@ def _cache_pesquisa_guardar(chave: str, agora: float, resultados: list) -> None:
         _CACHE_PESQUISA.popitem(last=False)  # descarta a mais antiga (LRU)
 
 
-def _pesquisar_shopkit_cached(termo: str) -> list[dict] | None:
+def _limpar_quantidade_termo(termo: str) -> str:
     """
-    Pesquisa um termo na Shopkit, com a mesma cache LRU do endpoint /pesquisar_produto.
-    Devolve list[{produto, ref}] (possivelmente vazia) ou None em erro/sem API key.
-    O chamador (ai_pipeline) usa o .pkl como fallback sempre que não houver
-    candidatos da loja — quer por erro (None), quer por 0 resultados ([]), já que
-    a pesquisa AND da loja não apanha sinónimos/abreviações ('clear'→'transparente').
+    Tira a quantidade do termo para a pesquisa por nome (o filtro AND eliminaria
+    todos os resultados se a qty lá estivesse). Remove:
+      1) o número INICIAL ("12 super primer" → "super primer");
+      2) "número + unidade" em qualquer posição ("super mãe 12 unidades" →
+         "super mãe"; "cola 3 un" → "cola").
+    Números internos do nome SEM unidade a seguir são preservados ("like gel
+    139", "lâmpada 90"), porque aí o número é distintivo, não uma quantidade.
     """
     termo = (termo or "").strip()
-    # A quantidade não faz parte do nome e, no filtro AND da Shopkit, eliminaria
-    # todos os resultados. Tira-se:
-    #   1) o número INICIAL ("12 super primer" → "super primer");
-    #   2) "número + unidade" em qualquer posição ("super mãe 12 unidades" →
-    #      "super mãe"; "cola 3 un" → "cola").
-    # Números internos do nome SEM unidade a seguir são preservados ("like gel
-    # 139", "lâmpada 90"), porque aí o número é distintivo, não uma quantidade.
     termo = re.sub(r"^\s*\d+\s*[-.)x]?\s*", "", termo, flags=re.IGNORECASE).strip()
-    termo = re.sub(
-        r"\b\d+\s*(?:unidades?|un|pcs?|cada)\b", " ", termo, flags=re.IGNORECASE
-    )
-    termo = re.sub(r"\s+", " ", termo).strip()
+    termo = re.sub(rf"\b\d+\s*{_UNIDADES_RE}\b", " ", termo, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", termo).strip()
+
+
+def _buscar_candidatos_catalogo(termo: str) -> list[dict] | None:
+    """
+    Candidatos para uma linha, pesquisados no catálogo JÁ em RAM (mesma filtragem
+    AND da Shopkit, mas sem rede). É a fonte usada no processamento de encomendas:
+    o catálogo completo foi carregado no arranque, por isso não há razão para bater
+    na API por cada linha — o que, em encomendas grandes, gerava 429 (rate limit) e
+    fazia linhas falharem ao calhar. Devolve list[{produto,ref}] ou None se não
+    houver catálogo em RAM (aí o ai_pipeline cai no rapidfuzz sobre prods_t).
+    """
+    termo = _limpar_quantidade_termo(termo)
+    if not termo:
+        return None
+    produtos, sku_map = _catalogo_produtos()
+    if not produtos:
+        return None
+    import shopkit_api
+    return shopkit_api.pesquisar_em_catalogo(termo, produtos, sku_map)
+
+
+def _pesquisar_shopkit_cached(termo: str) -> list[dict] | None:
+    """
+    Pesquisa um termo na Shopkit AO VIVO, com cache LRU. Usada pelo seletor
+    'Corrigir' (/pesquisar_produto), onde a colega pode procurar por sinónimos
+    que não estão no nome ('clear'→'transparente') e a API os apanha pela descrição.
+    Devolve list[{produto, ref}] (possivelmente vazia) ou None em erro/sem API key.
+    """
+    termo = _limpar_quantidade_termo(termo)
     api_key = os.environ.get("SHOPKIT_API_KEY")
     if not (api_key and termo):
         return None
@@ -1252,12 +1280,13 @@ def processar_texto():
 
             raw_rows: list[tuple] = []
             batch_errors: list[str] = []
-            # Fonte dos candidatos: a pesquisa Shopkit ao vivo (limpa a quantidade
-            # e devolve o nome exato da loja). Em falha/sem key cai no rapidfuzz
-            # sobre prods_t. Sem isto, linhas como "Super mãe 12 unidades" davam
+            # Fonte dos candidatos: pesquisa no catálogo em RAM (mesma filtragem
+            # AND da Shopkit, sem rede). Limpa a quantidade e devolve o nome exato
+            # do produto. Sem isto, linhas como "Super mãe 12 unidades" davam
             # candidatos ambíguos no fuzzy (vários produtos com "mãe" empatados a
-            # 50) e a AI, sem candidato único, ignorava a linha.
-            buscar = _pesquisar_shopkit_cached if os.environ.get("SHOPKIT_API_KEY") else None
+            # 50) e a AI, sem candidato único, ignorava a linha. Em falha cai no
+            # rapidfuzz sobre prods_t (dentro do ai_pipeline).
+            buscar = _buscar_candidatos_catalogo
             with ThreadPoolExecutor(max_workers=min(len(batches), max_workers)) as pool:
                 futs = {
                     pool.submit(

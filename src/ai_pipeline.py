@@ -7,6 +7,11 @@ from pathlib import Path
 
 from rapidfuzz import fuzz, process
 
+# Unidade que segue a quantidade ("12 unidades", "3 un"). 'unid\w*' tolera os
+# typos do WhatsApp ('unidases', 'unidaees'…). Mantido em sincronia com o mesmo
+# padrão em server.py (_UNIDADES_RE).
+_UNIDADES_RE = r"(?:unid\w*|un|pcs?|cada)"
+
 
 def _chave_nome(nome: str) -> str:
     """
@@ -135,8 +140,8 @@ def _linha_sem_quantidade(linha: str) -> str:
     unidade soltas. Números SEM unidade são preservados, porque podem ser
     distintivos do nome ('like gel 104', 'broca 13', 'lâmpada 90').
     """
-    s = re.sub(r"\b\d+\s*(?:unidades?|un|pcs?|cada)\b", " ", linha, flags=re.IGNORECASE)
-    s = re.sub(r"\b(?:unidades?|un|pcs?|cada)\b", " ", s, flags=re.IGNORECASE)
+    s = re.sub(rf"\b\d+\s*{_UNIDADES_RE}\b", " ", linha, flags=re.IGNORECASE)
+    s = re.sub(rf"\b{_UNIDADES_RE}\b", " ", s, flags=re.IGNORECASE)
     s = re.sub(r"\s+", " ", s).strip()
     return s or linha  # nunca devolver vazio (linhas que são só quantidade)
 
@@ -165,7 +170,7 @@ def _linhas_com_indices(texto: str) -> list[tuple[int, str]]:
 def _linha_so_contexto(linha: str) -> bool:
     lower = linha.lower().strip()
     lower_sem_qtd = re.sub(r"\b\d+\b", "", lower)
-    lower_sem_qtd = re.sub(r"\b(?:unidades?|un|pcs?|cada)\b", "", lower_sem_qtd).strip()
+    lower_sem_qtd = re.sub(rf"\b{_UNIDADES_RE}\b", "", lower_sem_qtd).strip()
     return (
         lower in {"de cada", "verniz normal", "verniz gel"}
         or lower.startswith(("bom dia", "boa tarde", "boa noite"))
