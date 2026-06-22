@@ -90,11 +90,16 @@ def _sem_acentos(texto: str) -> str:
 # (ex: "lâmpada 90 w" → o nome é "lâmpada led/uv 90"). São ignoradas na pesquisa.
 _UNIDADES_PESQUISA = {"w", "watt", "watts", "g", "gr", "gramas", "grama", "ml", "mm", "cm"}
 
+# A marca é removida dos nomes do catálogo (ver _normalizar_nome), por isso também
+# tem de ser descartada do termo de pesquisa: colar "Verniz Gel Fada INOCOS" do
+# site deve encontrar "verniz gel fada", não dar 0 resultados pelo filtro AND.
+_MARCAS_PESQUISA = {"inocos", "hifans"}
+
 
 def _palavras_pesquisa(termo: str) -> list[str]:
     """
     Palavras úteis do termo para o filtro AND: sem acentos, com a unidade
-    separada do número ('90w'→'90') e as unidades comuns descartadas.
+    separada do número ('90w'→'90') e as unidades/marca comuns descartadas.
     """
     palavras: list[str] = []
     for bruto in _sem_acentos(termo).split():
@@ -102,7 +107,7 @@ def _palavras_pesquisa(termo: str) -> list[str]:
         m = re.match(r"^(\d+)([a-z]+)$", bruto)
         partes = [m.group(1), m.group(2)] if m else [bruto]
         for parte in partes:
-            if parte and parte not in _UNIDADES_PESQUISA:
+            if parte and parte not in _UNIDADES_PESQUISA and parte not in _MARCAS_PESQUISA:
                 palavras.append(parte)
     return palavras
 
