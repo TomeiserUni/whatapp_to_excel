@@ -8,7 +8,7 @@
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: 'Segoe UI', sans-serif; background: #1a1a2e; color: #e0e0e0; min-height: 100vh; display: flex; flex-direction: column; }
 
-  header { background: #16213e; padding: 14px 24px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #0f3460; }
+  header { background: #16213e; padding: 14px 24px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #0f3460; position: sticky; top: 0; z-index: 100; }
   header h1 { font-size: 1.2rem; color: #4fc3f7; font-weight: 600; }
   #status-bar { font-size: 0.85rem; display: flex; align-items: center; gap: 8px; }
   #settings-modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 200; align-items: center; justify-content: center; }
@@ -27,8 +27,11 @@
   .alias-item .prods { color: #90caf9; font-size: .8rem; margin-top: 2px; }
   .alias-item .prods .ref { color: #546e7a; }
   .alias-item .inexistente { color: #ef9a9a; font-size: .8rem; font-style: italic; }
-  .alias-del { background: #4e2a2a; color: #ef9a9a; border: none; border-radius: 6px; padding: 4px 9px; font-size: .78rem; cursor: pointer; flex-shrink: 0; }
+  .alias-acoes { display: flex; gap: 6px; flex-shrink: 0; }
+  .alias-del { background: #4e2a2a; color: #ef9a9a; border: none; border-radius: 6px; padding: 4px 9px; font-size: .78rem; cursor: pointer; }
   .alias-del:hover { background: #6d3a3a; }
+  .alias-edit { background: #14406b; color: #90caf9; border: none; border-radius: 6px; padding: 4px 9px; font-size: .78rem; cursor: pointer; }
+  .alias-edit:hover { background: #1c5896; }
   .alias-chip { background: #1565c0; color: #fff; border-radius: 14px; padding: 3px 10px; font-size: .8rem; display: inline-flex; align-items: center; gap: 6px; }
   .alias-chip button { background: none; border: none; color: #bbdefb; cursor: pointer; font-size: .95rem; line-height: 1; padding: 0; }
   #alias-pesquisa-res div { padding: 7px 10px; cursor: pointer; border-radius: 6px; font-size: .85rem; color: #e0e0e0; }
@@ -78,6 +81,13 @@
   .qtd-cell { cursor: text; border-radius: 4px; }
   .qtd-cell:hover { background: rgba(21,101,192,.25); }
   .qtd-cell:focus { outline: 1px solid #1565c0; background: #0f3460; }
+  tr.linha-adicionada { background: rgba(21,101,192,.10); }
+  tr.linha-adicionada td:first-child { border-left: 3px solid #4fc3f7; }
+  tr.a-arrastar { opacity: .4; }
+  tr.drop-acima td { box-shadow: inset 0 2px 0 #4fc3f7; }
+  tr.drop-abaixo td { box-shadow: inset 0 -2px 0 #4fc3f7; }
+  .alca-arrastar { cursor: grab; color: #4fc3f7; user-select: none; padding-right: 6px; }
+  .alca-arrastar:active { cursor: grabbing; }
   .score-high { color: #66bb6a; }
   .score-mid  { color: #ffa726; }
   .score-low  { color: #ef5350; }
@@ -120,36 +130,38 @@
 <body>
 
 <header>
-  <h1>WhatsApp → Excel</h1>
+  <h1>text convertor to excel </h1>
   <div id="status-bar">
     <div id="status-dot"></div>
     <span id="status-txt">A carregar modelos…</span>
-    <button class="btn-secondary" id="btn-modo-edicao" onclick="toggleModoEdicao()" style="padding:5px 10px; font-size:.8rem; margin-left:12px;" title="Mostra um botão Corrigir em todas as linhas, incluindo as já reconhecidas">✎ Corrigir tudo</button>
-    <button class="btn-secondary" onclick="abrirAliases()" style="padding:5px 10px; font-size:.8rem; margin-left:6px;">🏷 Aliases</button>
+    <button class="btn-secondary" id="btn-modo-edicao" onclick="toggleModoEdicao()" style="padding:5px 10px; font-size:.8rem; margin-left:12px;" title="Mostra um botão Corrigir em todas as linhas, incluindo as já reconhecidas"> Corrigir produto </button>
+    <button class="btn-secondary" id="btn-adicionar-linha" onclick="adicionarLinha()" style="padding:5px 10px; font-size:.8rem; margin-left:6px;" title="Adiciona uma linha nova para escolher um produto da loja; arrasta para a posição que quiseres"> Adicionar produto </button>
+    <button class="btn-secondary" onclick="abrirAliases()" style="padding:5px 10px; font-size:.8rem; margin-left:6px;">Abreviações</button>
     <a href="/logout" style="padding:5px 10px; font-size:.8rem; background:#37474f; color:#e0e0e0; border-radius:7px; text-decoration:none; margin-left:6px;">Sair</a>
   </div>
 </header>
 
 <div id="settings-modal">
   <div id="settings-box" style="width:560px;">
-    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px;">
-      <h3 style="margin:0;">🏷 Aliases</h3>
-      <button class="btn-primary" onclick="abrirCriarAlias()" style="padding:5px 12px; font-size:.82rem;">+ Criar alias novo</button>
+    <div id="alias-cabecalho" style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px;">
+      <h3 style="margin:0;">Abreviações</h3>
+      <button class="btn-primary" onclick="abrirCriarAlias()" style="padding:5px 12px; font-size:.82rem;">+ Criar abreviação</button>
     </div>
 
     <!-- Abas -->
     <div id="alias-tabs" style="display:flex; gap:4px; border-bottom:1px solid #0f3460; margin-bottom:12px;">
-      <button class="alias-tab active" data-aba="criados" onclick="trocarAba('criados')">Adicionados</button>
-      <button class="alias-tab" data-aba="aprendidos" onclick="trocarAba('aprendidos')">Temporários</button>
+      <button class="alias-tab active" data-aba="unico" onclick="trocarAba('unico')">Produto único</button>
+      <button class="alias-tab" data-aba="varios" onclick="trocarAba('varios')">Vários produtos</button>
     </div>
 
     <!-- Lista de aliases -->
     <div id="alias-lista" style="max-height:48vh; overflow-y:auto;"></div>
 
-    <!-- Formulário de criação (escondido por defeito) -->
+    <!-- Formulário de criação/edição (escondido por defeito) -->
     <div id="alias-criar" style="display:none; border-top:1px solid #0f3460; margin-top:12px; padding-top:12px;">
-      <label>Expressão (o que escrevem na encomenda)</label>
-      <input id="alias-expressao" type="text" placeholder="ex: recargas drill"
+      <h4 id="alias-criar-titulo" style="color:#4fc3f7; margin:0 0 12px; font-size:.92rem;">Criar abreviação nova</h4>
+      <label>Expressão (várias separadas por vírgula = mesmos produtos)</label>
+      <input id="alias-expressao" type="text" placeholder="ex: cores novas, novos verniz gel"
              style="width:100%; padding:8px 12px; background:#0f3460; border:1px solid #1565c0; border-radius:7px; color:#e0e0e0; font-size:.88rem; margin-bottom:10px;">
       <label>Produtos da loja</label>
       <div id="alias-produtos-sel" style="display:flex; flex-wrap:wrap; gap:6px; margin:6px 0;"></div>
@@ -240,6 +252,117 @@ function toggleModoEdicao() {
     if (row.produto) renderIdentificada(tr, row);
     else renderNaoIdentificada(tr, row);
   });
+}
+
+// ── Adicionar linha manual (com pesquisa Shopkit e arrastar) ──────
+function adicionarLinha() {
+  const tbody = document.getElementById('tbody');
+  const row = { produto: '', qtd: 1, score: 1.0, ref: '', ficheiro: 'manual',
+                texto_origem: '', adicionada: true };
+  resultados.push(row);
+  const tr = document.createElement('tr');
+  tr._row = row;
+  tbody.appendChild(tr);
+  // Insere a meio das linhas visíveis, para ficar à vista (depois arrasta-se).
+  const linhas = tbody.querySelectorAll('tr');
+  if (linhas.length > 1) {
+    const meio = linhas[Math.floor((linhas.length - 1) / 2)];
+    tbody.insertBefore(tr, meio);
+  }
+  renderLinhaAdicionada(tr, row);
+  tr.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  // Abre logo a pesquisa para escolher o produto.
+  const texto = '';
+  abrirCorrecao(tr, texto, row);
+}
+
+function apagarLinha(tr, row) {
+  resultados = resultados.filter(x => x !== row);
+  tr.remove();
+  const identificados = resultados.filter(x => x.produto).length;
+  document.getElementById('total-txt').textContent = `${identificados} produto(s) identificado(s)`;
+  document.getElementById('btn-export').disabled = identificados === 0;
+}
+
+function renderLinhaAdicionada(tr, row) {
+  tr._row = row;
+  tr.classList.add('linha-adicionada');
+  tornarArrastavel(tr);
+  if (!row.produto) {
+    tr.innerHTML =
+      `<td><span class="alca-arrastar" title="Arrasta para reordenar">⠿</span>` +
+      `<span style="color:#9e9e9e;font-style:italic;">— escolhe um produto —</span></td>` +
+      `<td>${row.qtd}</td><td></td><td></td>` +
+      `<td class="alias-acoes" style="display:flex;gap:6px;">` +
+      `<button class="btn-corrigir" type="button">Escolher</button>` +
+      `<button class="alias-del btn-apagar-linha" type="button">Apagar</button></td>`;
+    tr.querySelector('.btn-corrigir').onclick = () => abrirCorrecao(tr, '', row);
+    tr.querySelector('.btn-apagar-linha').onclick = () => apagarLinha(tr, row);
+    return;
+  }
+  const cls = row.score >= 0.95 ? 'score-high' : row.score >= 0.85 ? 'score-mid' : 'score-low';
+  tr.innerHTML =
+    `<td><span class="alca-arrastar" title="Arrasta para reordenar">⠿</span>${row.produto}</td>` +
+    `<td class="qtd-cell" contenteditable="true" title="Clica para editar a quantidade">${row.qtd}</td>` +
+    `<td class="${cls}">${row.score}</td>` +
+    `<td>${row.ref || ''}</td>` +
+    `<td class="alias-acoes" style="display:flex;gap:6px;">` +
+    `<button class="btn-corrigir" type="button">Corrigir</button>` +
+    `<button class="alias-del btn-apagar-linha" type="button">Apagar</button></td>`;
+  tr.querySelector('.btn-corrigir').onclick = () => abrirCorrecao(tr, row.produto || '', row);
+  tr.querySelector('.btn-apagar-linha').onclick = () => apagarLinha(tr, row);
+  const cel = tr.querySelector('.qtd-cell');
+  const aplicar = () => {
+    const n = parseInt(cel.textContent.replace(/\D/g, ''), 10);
+    row.qtd = (n && n > 0) ? n : 1;
+    cel.textContent = row.qtd;
+  };
+  cel.onblur = aplicar;
+  cel.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); cel.blur(); } };
+}
+
+// Drag & drop — só linhas adicionadas. Reordena a tabela e o array `resultados`.
+let _trArrastar = null;
+function tornarArrastavel(tr) {
+  tr.setAttribute('draggable', 'true');
+  tr.addEventListener('dragstart', e => {
+    _trArrastar = tr; tr.classList.add('a-arrastar');
+    e.dataTransfer.effectAllowed = 'move';
+  });
+  tr.addEventListener('dragend', () => {
+    tr.classList.remove('a-arrastar');
+    document.querySelectorAll('#tbody tr').forEach(t => t.classList.remove('drop-acima','drop-abaixo'));
+    _trArrastar = null;
+    sincronizarResultados();
+  });
+}
+
+document.getElementById('tbody').addEventListener('dragover', e => {
+  if (!_trArrastar) return;
+  e.preventDefault();
+  const alvo = e.target.closest('tr');
+  if (!alvo || alvo === _trArrastar) return;
+  const r = alvo.getBoundingClientRect();
+  const acima = (e.clientY - r.top) < r.height / 2;
+  document.querySelectorAll('#tbody tr').forEach(t => t.classList.remove('drop-acima','drop-abaixo'));
+  alvo.classList.add(acima ? 'drop-acima' : 'drop-abaixo');
+});
+
+document.getElementById('tbody').addEventListener('drop', e => {
+  if (!_trArrastar) return;
+  e.preventDefault();
+  const alvo = e.target.closest('tr');
+  if (!alvo || alvo === _trArrastar) return;
+  const r = alvo.getBoundingClientRect();
+  const acima = (e.clientY - r.top) < r.height / 2;
+  alvo.parentNode.insertBefore(_trArrastar, acima ? alvo : alvo.nextSibling);
+});
+
+// Reordena o array `resultados` para corresponder à ordem visual das linhas.
+function sincronizarResultados() {
+  const ordenados = [];
+  document.querySelectorAll('#tbody tr').forEach(tr => { if (tr._row) ordenados.push(tr._row); });
+  if (ordenados.length === resultados.length) { resultados = ordenados; }
 }
 
 // ── Linhas não-identificadas (render + correção) ──────────────────
@@ -351,7 +474,17 @@ function abrirCorrecao(tr, texto, row) {
 
   input.oninput = agendar;
   input.onfocus = pesquisar;
-  td.querySelector('.btn-cancelar').onclick = () => renderNaoIdentificada(tr, row);
+  td.querySelector('.btn-cancelar').onclick = () => {
+    if (row.adicionada && !row.produto) {
+      // Linha nova cancelada sem produto: remove-a de vez.
+      resultados = resultados.filter(x => x !== row);
+      tr.remove();
+    } else if (row.adicionada) {
+      renderLinhaAdicionada(tr, row);
+    } else {
+      renderNaoIdentificada(tr, row);
+    }
+  };
   td.querySelector('.btn-inexistente').onclick = () => marcarInexistente(tr, texto, row);
   input.focus();
   pesquisar();
@@ -375,19 +508,25 @@ async function marcarInexistente(tr, texto, row) {
 
 async function gravarCorrecao(tr, texto, produto, ref, qtd, row) {
   try {
-    const r = await fetch('/aprender_alias', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ texto, produto, ref })
-    });
-    const d = await r.json();
-    if (!d.ok) { alert('Erro: ' + (d.erro || 'desconhecido')); return; }
+    // Linha adicionada à mão não tem texto de origem → não cria alias, só
+    // preenche a linha. As correções normais continuam a aprender o alias.
+    if (!row.adicionada && texto) {
+      const r = await fetch('/aprender_alias', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ texto, produto, ref })
+      });
+      const d = await r.json();
+      if (!d.ok) { alert('Erro: ' + (d.erro || 'desconhecido')); return; }
+      produto = d.produto; ref = d.ref;
+    }
     // Atualiza a linha para o produto escolhido e o resultado em memória.
     // A quantidade vem do campo confirmado (vale só para esta linha / Excel).
-    row.produto = d.produto; row.ref = d.ref; row.score = 1;
+    row.produto = produto; row.ref = ref; row.score = 1;
     row.qtd = (qtd && qtd > 0) ? qtd : 1;
     row.inexistente = false;
-    renderIdentificada(tr, row);
+    if (row.adicionada) renderLinhaAdicionada(tr, row);
+    else renderIdentificada(tr, row);
     const identificados = resultados.filter(x => x.produto).length;
     document.getElementById('total-txt').textContent = `${identificados} produto(s) identificado(s)`;
     document.getElementById('btn-export').disabled = identificados === 0;
@@ -558,11 +697,12 @@ function esconderLoading() {
   document.getElementById('loading-overlay').classList.remove('visible');
 }
 
-// ── Aliases ────────────────────────────────────────────────────
-let _aliasDados = { criados: {}, aprendidos: {} };
-let _abaAtual = 'criados';
+// ── Abreviações ────────────────────────────────────────────────
+let _aliasDados = { unico: [], varios: [] };
+let _abaAtual = 'unico';        // 'unico' (1 produto) | 'varios' (2+)
 let _aliasSelecionados = [];   // produtos escolhidos no formulário de criação
 let _aliasTimer = null;
+let _aliasEditando = null;     // chave original em edição (null = criação nova)
 
 async function abrirAliases() {
   document.getElementById('settings-modal').classList.add('visible');
@@ -578,7 +718,7 @@ async function carregarAliases() {
   try {
     const r = await fetch('/aliases');
     _aliasDados = await r.json();
-  } catch (e) { _aliasDados = { criados: {}, aprendidos: {} }; }
+  } catch (e) { _aliasDados = { unico: [], varios: [] }; }
   renderAliasLista();
 }
 
@@ -591,46 +731,69 @@ function trocarAba(aba) {
 
 function renderAliasLista() {
   const cont = document.getElementById('alias-lista');
-  const dados = _aliasDados[_abaAtual] || {};
-  const chaves = Object.keys(dados);
-  if (!chaves.length) {
-    cont.innerHTML = `<div id="alias-vazio">Sem aliases ${_abaAtual === 'criados' ? 'adicionados' : 'temporários'}.</div>`;
+  const grupos = _aliasDados[_abaAtual] || [];
+  if (!grupos.length) {
+    const txt = _abaAtual === 'unico' ? 'de produto único' : 'de vários produtos';
+    cont.innerHTML = `<div id="alias-vazio">Sem abreviações ${txt}.</div>`;
     return;
   }
-  cont.innerHTML = chaves.map(chave => {
-    const a = dados[chave];
-    let corpo;
-    if (a.inexistente) {
-      corpo = `<div class="inexistente">marcado como inexistente</div>`;
-    } else {
-      corpo = `<div class="prods">` + a.produtos.map(p =>
-        `${escapeHtml(p.produto)} <span class="ref">${p.ref || ''}</span>`).join(' · ') + `</div>`;
-    }
+  cont.innerHTML = grupos.map((g, i) => {
+    const expr = g.chaves.map(escapeHtml).join(', ');
+    const corpo = `<div class="prods">` + g.produtos.map(p =>
+      `${escapeHtml(p.produto)} <span class="ref">${p.ref || ''}</span>`).join(' · ') + `</div>`;
     return `<div class="alias-item">
-      <div><div class="expr">${escapeHtml(chave)}</div>${corpo}</div>
-      <button class="alias-del" onclick="apagarAlias('${escapeAttr(chave)}')">Apagar</button>
+      <div><div class="expr">${expr}</div>${corpo}</div>
+      <div class="alias-acoes">
+        <button class="alias-edit" onclick="editarAlias(${i})">Editar</button>
+        <button class="alias-del" onclick="apagarAlias(${i})">Apagar</button>
+      </div>
     </div>`;
   }).join('');
 }
 
-async function apagarAlias(chave) {
-  if (!confirm(`Apagar o alias "${chave}"?`)) return;
+async function apagarAlias(i) {
+  const g = (_aliasDados[_abaAtual] || [])[i];
+  if (!g) return;
+  const lista = g.chaves.map(c => `"${c}"`).join(', ');
+  if (!confirm(`Apagar ${g.chaves.length > 1 ? 'as abreviações' : 'a abreviação'} ${lista}?`)) return;
   await fetch('/aliases', {
     method: 'DELETE',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chave, aba: _abaAtual })
+    body: JSON.stringify({ chaves: g.chaves })
   });
   await carregarAliases();
 }
 
-// ── Criar alias ────────────────────────────────────────────────
+// ── Criar / editar alias ───────────────────────────────────────
 function abrirCriarAlias() {
+  _aliasEditando = null;
   _aliasSelecionados = [];
   document.getElementById('alias-expressao').value = '';
   document.getElementById('alias-pesquisa').value = '';
   document.getElementById('alias-pesquisa-res').innerHTML = '';
   document.getElementById('alias-criar-status').textContent = '';
+  document.getElementById('alias-criar-titulo').textContent = 'Criar abreviação nova';
   renderSelecionados();
+  document.getElementById('alias-cabecalho').style.display = 'none';
+  document.getElementById('alias-criar').style.display = 'block';
+  document.getElementById('alias-lista').style.display = 'none';
+  document.getElementById('alias-tabs').style.display = 'none';
+  document.getElementById('alias-fechar-row').style.display = 'none';
+  document.getElementById('alias-expressao').focus();
+}
+
+function editarAlias(i) {
+  const g = (_aliasDados[_abaAtual] || [])[i];
+  if (!g) return;
+  _aliasEditando = g.chaves;   // grupo de chaves a substituir ao guardar
+  _aliasSelecionados = (g.produtos || []).map(p => ({ produto: p.produto, ref: p.ref }));
+  document.getElementById('alias-expressao').value = g.chaves.join(', ');
+  document.getElementById('alias-pesquisa').value = '';
+  document.getElementById('alias-pesquisa-res').innerHTML = '';
+  document.getElementById('alias-criar-status').textContent = '';
+  document.getElementById('alias-criar-titulo').textContent = 'Editar abreviação';
+  renderSelecionados();
+  document.getElementById('alias-cabecalho').style.display = 'none';
   document.getElementById('alias-criar').style.display = 'block';
   document.getElementById('alias-lista').style.display = 'none';
   document.getElementById('alias-tabs').style.display = 'none';
@@ -639,6 +802,8 @@ function abrirCriarAlias() {
 }
 
 function cancelarCriarAlias() {
+  _aliasEditando = null;
+  document.getElementById('alias-cabecalho').style.display = 'flex';
   document.getElementById('alias-criar').style.display = 'none';
   document.getElementById('alias-lista').style.display = 'block';
   document.getElementById('alias-tabs').style.display = 'flex';
@@ -685,6 +850,17 @@ async function guardarAlias() {
   const status = document.getElementById('alias-criar-status');
   if (!expressao) { status.textContent = 'Escreve a expressão.'; status.style.color = '#ef5350'; return; }
   if (!_aliasSelecionados.length) { status.textContent = 'Adiciona pelo menos um produto.'; status.style.color = '#ef5350'; return; }
+
+  // Em edição, apaga as abreviações originais primeiro: cobre a mudança de
+  // expressões (chaves mudam) e a mudança de nº de produtos.
+  if (_aliasEditando) {
+    await fetch('/aliases', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chaves: _aliasEditando })
+    });
+  }
+
   const r = await fetch('/aliases', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -692,8 +868,9 @@ async function guardarAlias() {
   });
   const d = await r.json();
   if (d.ok) {
-    _abaAtual = 'criados';
-    document.querySelectorAll('.alias-tab').forEach(b => b.classList.toggle('active', b.dataset.aba === 'criados'));
+    // Vai para a aba que corresponde ao nº de produtos escolhidos.
+    _abaAtual = _aliasSelecionados.length === 1 ? 'unico' : 'varios';
+    document.querySelectorAll('.alias-tab').forEach(b => b.classList.toggle('active', b.dataset.aba === _abaAtual));
     cancelarCriarAlias();
     await carregarAliases();
   } else {

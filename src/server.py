@@ -1196,19 +1196,50 @@ def _alias_para_ui(valor) -> dict:
 @app.route("/aliases", methods=["GET"])
 @login_required
 def listar_aliases():
-    """Aliases para a janela de gestão, separados por aba: criados e aprendidos."""
-    criados = {k: _alias_para_ui(v) for k, v in _carregar_aliases_criados().items()}
-    aprendidos = {k: _alias_para_ui(v) for k, v in _carregar_aliases_aprendidos().items()}
-    return jsonify({"criados": criados, "aprendidos": aprendidos})
+    """
+    Abreviações para a janela de gestão, classificadas por nº de produtos:
+    'unico' (1 produto) e 'varios' (2+). Junta as criadas à mão e as aprendidas
+    pelo botão Corrigir (as criadas ganham em caso de mesma chave). Marcadores
+    de inexistente ficam de fora.
+
+    Abreviações com o MESMO conjunto de produtos são agrupadas numa só entrada
+    (com a lista de expressões em 'chaves'), para "cores novas" e "novos verniz
+    gel" aparecerem juntas se apontarem para os mesmos produtos.
+    """
+    juntos = dict(_carregar_aliases_aprendidos())
+    juntos.update(_carregar_aliases_criados())  # criadas têm prioridade
+
+    # Agrupa por assinatura do conjunto de produtos (ordenado, para ser estável).
+    grupos: dict[tuple, dict] = {}
+    for chave, valor in juntos.items():
+        produtos = _alias_produtos(valor)
+        if not produtos:
+            continue
+        assinatura = tuple(sorted(produtos))
+        g = grupos.setdefault(assinatura, {"chaves": [], "produtos": produtos})
+        g["chaves"].append(chave)
+
+    _, sku_map = _catalogo_produtos()
+    unico, varios = [], []
+    for g in grupos.values():
+        entrada = {
+            "chaves": sorted(g["chaves"]),
+            "produtos": [{"produto": p, "ref": sku_map.get(p, "")} for p in g["produtos"]],
+        }
+        (unico if len(g["produtos"]) == 1 else varios).append(entrada)
+    unico.sort(key=lambda e: e["chaves"][0])
+    varios.sort(key=lambda e: e["chaves"][0])
+    return jsonify({"unico": unico, "varios": varios})
 
 
 @app.route("/aliases", methods=["POST"])
 @login_required
 def criar_alias():
     """
-    Cria/atualiza um alias permanente (aba 'Adicionados').
-    Recebe {expressao, produtos: ["nome1", "nome2", ...]}. A chave é normalizada
-    como nas tendências (sem quantidade/pontuação), igual ao botão Corrigir.
+    Cria/atualiza abreviações permanentes. Recebe {expressao, produtos:[...]}.
+    O campo 'expressao' pode ter VÁRIAS expressões separadas por vírgula
+    ("cores novas, novos verniz gel"): cada uma vira uma abreviação para o MESMO
+    conjunto de produtos. Cada chave é normalizada (sem quantidade/pontuação).
     """
     dados = request.get_json(silent=True) or {}
     expressao = (dados.get("expressao") or "").strip()
@@ -1216,42 +1247,53 @@ def criar_alias():
     if not expressao or not produtos:
         return jsonify({"ok": False, "erro": "expressão e pelo menos um produto são obrigatórios"}), 400
 
-    chave = _normalizar_para_tendencia(expressao)
-    if not chave:
+    # Várias expressões separadas por vírgula → várias chaves para os mesmos produtos.
+    chaves = []
+    for parte in expressao.split(","):
+        chave = _normalizar_para_tendencia(parte)
+        if chave and chave not in chaves:
+            chaves.append(chave)
+    if not chaves:
         return jsonify({"ok": False, "erro": "expressão sem conteúdo útil"}), 400
 
-    criados = _carregar_aliases_criados()
     # Guarda string quando é só um produto (retrocompatível), lista quando vários.
-    criados[chave] = produtos[0] if len(produtos) == 1 else produtos
+    valor = produtos[0] if len(produtos) == 1 else produtos
+    criados = _carregar_aliases_criados()
+    for chave in chaves:
+        criados[chave] = valor
     _guardar_aliases_criados(criados)
     _aplicar_aliases_aprendidos()
-    return jsonify({"ok": True, "chave": chave, "alias": _alias_para_ui(criados[chave])})
+    return jsonify({"ok": True, "chaves": chaves, "alias": _alias_para_ui(valor)})
 
 
 @app.route("/aliases", methods=["DELETE"])
 @login_required
 def apagar_alias():
-    """Apaga um alias. Recebe {chave, aba} onde aba ∈ {'criados','aprendidos'}."""
+    """Apaga abreviações pelas chaves, onde quer que estejam (criadas ou
+    aprendidas). Recebe {chave} (uma) ou {chaves:[...]} (um grupo inteiro)."""
     dados = request.get_json(silent=True) or {}
-    chave = (dados.get("chave") or "").strip()
-    aba = (dados.get("aba") or "").strip()
-    if not chave or aba not in ("criados", "aprendidos"):
-        return jsonify({"ok": False, "erro": "chave e aba válida são obrigatórias"}), 400
+    chaves = dados.get("chaves") or ([dados["chave"]] if dados.get("chave") else [])
+    chaves = [(c or "").strip() for c in chaves if (c or "").strip()]
+    if not chaves:
+        return jsonify({"ok": False, "erro": "chave(s) obrigatória(s)"}), 400
 
     global _cache_aprendidos
-    if aba == "criados":
-        dados_aba = dict(_carregar_aliases_criados())
-        if chave in dados_aba:
-            del dados_aba[chave]
-            _guardar_aliases_criados(dados_aba)
-    else:
-        dados_aba = dict(_carregar_aliases_aprendidos())
-        if chave in dados_aba:
-            del dados_aba[chave]
-            _ALIASES_APRENDIDOS.parent.mkdir(parents=True, exist_ok=True)
-            with open(_ALIASES_APRENDIDOS, "w", encoding="utf-8") as f:
-                json.dump(dados_aba, f, ensure_ascii=False, indent=2)
-            _cache_aprendidos = None  # invalida
+    criados = dict(_carregar_aliases_criados())
+    aprendidos = dict(_carregar_aliases_aprendidos())
+    mudou_criados = mudou_aprendidos = False
+    for chave in chaves:
+        if chave in criados:
+            del criados[chave]; mudou_criados = True
+        if chave in aprendidos:
+            del aprendidos[chave]; mudou_aprendidos = True
+
+    if mudou_criados:
+        _guardar_aliases_criados(criados)
+    if mudou_aprendidos:
+        _ALIASES_APRENDIDOS.parent.mkdir(parents=True, exist_ok=True)
+        with open(_ALIASES_APRENDIDOS, "w", encoding="utf-8") as f:
+            json.dump(aprendidos, f, ensure_ascii=False, indent=2)
+        _cache_aprendidos = None  # invalida
 
     # Reconstrói o pipeline a partir do catálogo base + aliases restantes, senão
     # um alias apagado continuava em memória (a fusão só acrescenta, não remove).
