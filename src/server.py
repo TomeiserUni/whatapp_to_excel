@@ -43,26 +43,74 @@ _LOG_NAO_RECONHECIDAS = _USER_DIR / "data" / "nao_reconhecidas.jsonl"
 # separado do aliases.json curado à mão; é fundido por cima ao carregar.
 _ALIASES_APRENDIDOS = _USER_DIR / "data" / "aliases_aprendidos.json"
 
+# Aliases criados deliberadamente na janela de Aliases (aba "Adicionados").
+# Permanentes e geridos pela utilizadora; têm prioridade sobre os aprendidos.
+_ALIASES_CRIADOS = _USER_DIR / "data" / "aliases_criados.json"
+
 # Palavras de unidade que o cliente escreve a seguir à quantidade ("12 unidades",
 # "6 un", "3 pcs"). 'unid\w*' tolera os typos frequentes do WhatsApp ('unidases',
 # 'unidaees', 'unidde'…) — qualquer palavra começada por 'unid' conta como unidade.
 _UNIDADES_RE = r"(?:unid\w*|un|und|pcs?|cada)"
 
 
+# Cache em memória dos dois ficheiros de aliases. _linha_so_contexto consulta-os
+# por cada linha de cada encomenda; reler o disco de cada vez seria lento. A cache
+# é invalidada (posta a None) sempre que se grava.
+_cache_aprendidos: dict | None = None
+_cache_criados: dict | None = None
+
+
 def _carregar_aliases_aprendidos() -> dict:
-    try:
-        with open(_ALIASES_APRENDIDOS, encoding="utf-8") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
+    global _cache_aprendidos
+    if _cache_aprendidos is None:
+        try:
+            with open(_ALIASES_APRENDIDOS, encoding="utf-8") as f:
+                _cache_aprendidos = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            _cache_aprendidos = {}
+    return _cache_aprendidos
 
 
 def _gravar_alias_aprendido(chave: str, produto: str) -> None:
-    aprendidos = _carregar_aliases_aprendidos()
+    global _cache_aprendidos
+    aprendidos = dict(_carregar_aliases_aprendidos())
     aprendidos[chave] = produto
     _ALIASES_APRENDIDOS.parent.mkdir(parents=True, exist_ok=True)
     with open(_ALIASES_APRENDIDOS, "w", encoding="utf-8") as f:
         json.dump(aprendidos, f, ensure_ascii=False, indent=2)
+    _cache_aprendidos = None  # invalida
+
+
+def _carregar_aliases_criados() -> dict:
+    global _cache_criados
+    if _cache_criados is None:
+        try:
+            with open(_ALIASES_CRIADOS, encoding="utf-8") as f:
+                _cache_criados = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            _cache_criados = {}
+    return _cache_criados
+
+
+def _guardar_aliases_criados(criados: dict) -> None:
+    global _cache_criados
+    _ALIASES_CRIADOS.parent.mkdir(parents=True, exist_ok=True)
+    with open(_ALIASES_CRIADOS, "w", encoding="utf-8") as f:
+        json.dump(criados, f, ensure_ascii=False, indent=2)
+    _cache_criados = None  # invalida
+
+
+def _alias_produtos(valor) -> list[str]:
+    """
+    Normaliza o valor de um alias para uma lista de produtos. Aceita o formato
+    antigo (string = 1 produto) e o novo (lista = vários). Marcadores vazios
+    ("" / __INEXISTENTE__) ficam de fora — são tratados como "ignorar linha".
+    """
+    if isinstance(valor, list):
+        return [p for p in valor if p and p != INEXISTENTE]
+    if isinstance(valor, str) and valor and valor != INEXISTENTE:
+        return [valor]
+    return []
 
 
 def _normalizar_para_tendencia(linha: str) -> str:
@@ -135,6 +183,22 @@ _GENERICOS_SO_CONTEXTO = {
 }
 
 
+def _tem_alias_para_linha(linha: str) -> bool:
+    """
+    True se a linha corresponde a um alias criado/aprendido ativo. Um alias que a
+    utilizadora criou de propósito (ex: "cores novas" → 6 vernizes) tem prioridade
+    sobre a lista de linhas-contexto: deixa de ser ruído e passa a ser um pedido.
+    """
+    chave = _normalizar_para_tendencia(linha)
+    if not chave:
+        return False
+    if chave in _carregar_aliases_criados():
+        return True
+    # Aprendidos só contam se apontarem para um produto real (não __INEXISTENTE__).
+    valor = _carregar_aliases_aprendidos().get(chave)
+    return bool(_alias_produtos(valor))
+
+
 def _linha_so_contexto(linha: str) -> bool:
     lower = linha.lower().strip()
     lower_sem_qtd = re.sub(r"\b\d+\b", "", lower)
@@ -142,6 +206,9 @@ def _linha_so_contexto(linha: str) -> bool:
     # remove pontuação/hífens soltos (ex: "4- verniz gel cateye" → "verniz gel cateye")
     lower_sem_qtd = re.sub(r"[^\w\s]", " ", lower_sem_qtd)
     lower_sem_qtd = re.sub(r"\s+", " ", lower_sem_qtd).strip()
+    # Um alias criado/aprendido para esta linha anula a regra de contexto.
+    if _tem_alias_para_linha(linha):
+        return False
     return (
         lower in {"de cada"} or lower_sem_qtd in _GENERICOS_SO_CONTEXTO
         or lower.startswith(("bom dia", "boa tarde", "boa noite"))
@@ -409,18 +476,21 @@ def _expandir_identificadores_unicos(linhas: list[str], produtos: list[str], sku
 
 def _expandir_aliases_diretos(linhas: list[str], aliases: dict, sku_map: dict) -> list[dict]:
     resultados = []
+    # Cada alias pode mapear para 1 produto (string) ou vários (lista). Guarda-se
+    # já como lista de produtos; aliases sem produtos úteis (ex: marcador "") saem.
     aliases_ordenados = sorted(
-        ((alias, produto) for alias, produto in (aliases or {}).items() if produto),
+        ((alias, _alias_produtos(valor)) for alias, valor in (aliases or {}).items()),
         key=lambda item: len(item[0]),
         reverse=True,
     )
+    aliases_ordenados = [(a, prods) for a, prods in aliases_ordenados if prods]
 
     for idx, linha in enumerate(linhas, 1):
         if _linha_so_contexto(linha):
             continue
 
         linha_norm = _normalizar_token(linha)
-        for alias, produto in aliases_ordenados:
+        for alias, produtos_alias in aliases_ordenados:
             alias_norm = _normalizar_token(alias)
             if not alias_norm:
                 continue
@@ -454,15 +524,18 @@ def _expandir_aliases_diretos(linhas: list[str], aliases: dict, sku_map: dict) -
                 qtd = int(m_qty_unidade.group(1))
             else:
                 qtd = _quantidade_linha(linha_norm[:m_alias.end()], ignorar=nums_alias)
-            resultados.append({
-                "ficheiro":     "texto colado",
-                "produto":      produto,
-                "qtd":          qtd,
-                "score":        1.0,
-                "ref":          sku_map.get(produto, ""),
-                "texto_origem": f"linha {idx}: {linha}",
-                "_linha_idx":   idx,
-            })
+            # Um alias pode expandir para vários produtos (ex: "recargas drill" →
+            # 3 lixas); todos recebem a mesma quantidade da linha.
+            for produto in produtos_alias:
+                resultados.append({
+                    "ficheiro":     "texto colado",
+                    "produto":      produto,
+                    "qtd":          qtd,
+                    "score":        1.0,
+                    "ref":          sku_map.get(produto, ""),
+                    "texto_origem": f"linha {idx}: {linha}",
+                    "_linha_idx":   idx,
+                })
             break
 
     return resultados
@@ -727,14 +800,21 @@ def logout():
 
 
 def _aplicar_aliases_aprendidos() -> None:
-    """Funde os aliases aprendidos (botão Corrigir) por cima dos curados, em memória."""
+    """
+    Funde os aliases criados (janela Aliases) e aprendidos (botão Corrigir) por
+    cima dos curados, em memória. Prioridade: criados > aprendidos > curados.
+    """
     if _pipeline is None:
         return
     aprendidos = _carregar_aliases_aprendidos()
-    if not aprendidos:
+    criados = _carregar_aliases_criados()
+    if not aprendidos and not criados:
         return
     # Marcadores de "não existe na loja" → alias para "" (linha ignorada no matching).
-    efetivos = {k: ("" if v == INEXISTENTE else v) for k, v in aprendidos.items()}
+    def _efetivo(v):
+        return "" if v == INEXISTENTE else v
+    efetivos = {k: _efetivo(v) for k, v in aprendidos.items()}
+    efetivos.update({k: _efetivo(v) for k, v in criados.items()})  # criados ganham
     for campo in ("aliases", "ai_aliases"):
         base = _pipeline.get(campo)
         if isinstance(base, dict):
@@ -1101,6 +1181,100 @@ def aprender_alias():
     return jsonify({"ok": True, "chave": chave, "produto": produto, "ref": ref})
 
 
+def _alias_para_ui(valor) -> dict:
+    """Formata um alias para a janela: lista de {produto, ref} ou marca inexistente."""
+    if valor == INEXISTENTE:
+        return {"inexistente": True, "produtos": []}
+    _, sku_map = _catalogo_produtos()
+    produtos = _alias_produtos(valor)
+    return {
+        "inexistente": False,
+        "produtos": [{"produto": p, "ref": sku_map.get(p, "")} for p in produtos],
+    }
+
+
+@app.route("/aliases", methods=["GET"])
+@login_required
+def listar_aliases():
+    """Aliases para a janela de gestão, separados por aba: criados e aprendidos."""
+    criados = {k: _alias_para_ui(v) for k, v in _carregar_aliases_criados().items()}
+    aprendidos = {k: _alias_para_ui(v) for k, v in _carregar_aliases_aprendidos().items()}
+    return jsonify({"criados": criados, "aprendidos": aprendidos})
+
+
+@app.route("/aliases", methods=["POST"])
+@login_required
+def criar_alias():
+    """
+    Cria/atualiza um alias permanente (aba 'Adicionados').
+    Recebe {expressao, produtos: ["nome1", "nome2", ...]}. A chave é normalizada
+    como nas tendências (sem quantidade/pontuação), igual ao botão Corrigir.
+    """
+    dados = request.get_json(silent=True) or {}
+    expressao = (dados.get("expressao") or "").strip()
+    produtos = [p.strip() for p in (dados.get("produtos") or []) if (p or "").strip()]
+    if not expressao or not produtos:
+        return jsonify({"ok": False, "erro": "expressão e pelo menos um produto são obrigatórios"}), 400
+
+    chave = _normalizar_para_tendencia(expressao)
+    if not chave:
+        return jsonify({"ok": False, "erro": "expressão sem conteúdo útil"}), 400
+
+    criados = _carregar_aliases_criados()
+    # Guarda string quando é só um produto (retrocompatível), lista quando vários.
+    criados[chave] = produtos[0] if len(produtos) == 1 else produtos
+    _guardar_aliases_criados(criados)
+    _aplicar_aliases_aprendidos()
+    return jsonify({"ok": True, "chave": chave, "alias": _alias_para_ui(criados[chave])})
+
+
+@app.route("/aliases", methods=["DELETE"])
+@login_required
+def apagar_alias():
+    """Apaga um alias. Recebe {chave, aba} onde aba ∈ {'criados','aprendidos'}."""
+    dados = request.get_json(silent=True) or {}
+    chave = (dados.get("chave") or "").strip()
+    aba = (dados.get("aba") or "").strip()
+    if not chave or aba not in ("criados", "aprendidos"):
+        return jsonify({"ok": False, "erro": "chave e aba válida são obrigatórias"}), 400
+
+    global _cache_aprendidos
+    if aba == "criados":
+        dados_aba = dict(_carregar_aliases_criados())
+        if chave in dados_aba:
+            del dados_aba[chave]
+            _guardar_aliases_criados(dados_aba)
+    else:
+        dados_aba = dict(_carregar_aliases_aprendidos())
+        if chave in dados_aba:
+            del dados_aba[chave]
+            _ALIASES_APRENDIDOS.parent.mkdir(parents=True, exist_ok=True)
+            with open(_ALIASES_APRENDIDOS, "w", encoding="utf-8") as f:
+                json.dump(dados_aba, f, ensure_ascii=False, indent=2)
+            _cache_aprendidos = None  # invalida
+
+    # Reconstrói o pipeline a partir do catálogo base + aliases restantes, senão
+    # um alias apagado continuava em memória (a fusão só acrescenta, não remove).
+    _recarregar_aliases_no_pipeline()
+    return jsonify({"ok": True})
+
+
+def _recarregar_aliases_no_pipeline() -> None:
+    """Repõe os aliases curados (do disco) e volta a fundir criados+aprendidos.
+    Necessário ao apagar: a fusão em memória só acrescenta, nunca remove."""
+    if _pipeline is None:
+        return
+    try:
+        _, _, aliases_curados, _ = _pipeline["ai_pl"].load_produtos(_BUNDLE / "data")
+    except Exception as e:
+        print(f"[aliases] não consegui recarregar curados: {e}")
+        aliases_curados = {}
+    for campo in ("aliases", "ai_aliases"):
+        if isinstance(_pipeline.get(campo), dict):
+            _pipeline[campo] = dict(aliases_curados)
+    _aplicar_aliases_aprendidos()
+
+
 @app.route("/config", methods=["GET"])
 @login_required
 def get_config():
@@ -1249,12 +1423,17 @@ def processar_texto():
         sku_final = pl.get("ai_sku_map") or pl["sku_map"]
 
         # 1) Regras PLN sobre todas as linhas
-        resultados.extend(_expandir_aliases_diretos(linhas, aliases_t, sku_final))
+        alias_rows = _expandir_aliases_diretos(linhas, aliases_t, sku_final)
+        resultados.extend(alias_rows)
         resultados.extend(_expandir_referencias_sku(linhas, sku_final))
         brocas = _expandir_brocas_numeradas(linhas, prods_t, sku_final)
         resultados.extend(brocas)
+        # Linhas já resolvidas por um alias direto não devem ser "enriquecidas" por
+        # outras regras (ex: alias "cores novas" → 6 cores; sem isto o identificador
+        # único apanhava "nova" e juntava "verniz gel maria nova iorque").
+        linhas_alias = {r["_linha_idx"] for r in alias_rows}
         linhas_brocas = {r["_linha_idx"] for r in brocas}
-        resultados.extend(_expandir_identificadores_unicos(linhas, prods_t, sku_final, ignorar_linhas=linhas_brocas))
+        resultados.extend(_expandir_identificadores_unicos(linhas, prods_t, sku_final, ignorar_linhas=linhas_brocas | linhas_alias))
         resultados.extend(_expandir_lista_variantes_numeradas(linhas, prods_t, sku_final))
         resultados.extend(_expandir_regras_de_cada(linhas, sku_final))
 

@@ -20,6 +20,21 @@
   .key-row input { flex: 1; padding: 8px 12px; background: #0f3460; border: 1px solid #1565c0; border-radius: 7px; color: #e0e0e0; font-size: .88rem; }
   #key-status { font-size: .8rem; margin-top: 8px; min-height: 18px; }
   .settings-actions { display: flex; gap: 8px; margin-top: 16px; justify-content: flex-end; }
+  .alias-tab { background: none; border: none; color: #90caf9; padding: 8px 14px; font-size: .85rem; cursor: pointer; border-bottom: 2px solid transparent; }
+  .alias-tab.active { color: #4fc3f7; border-bottom-color: #4fc3f7; font-weight: 600; }
+  .alias-item { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; padding: 9px 10px; border-radius: 7px; background: #0f3460; margin-bottom: 6px; }
+  .alias-item .expr { color: #e0e0e0; font-weight: 600; font-size: .88rem; }
+  .alias-item .prods { color: #90caf9; font-size: .8rem; margin-top: 2px; }
+  .alias-item .prods .ref { color: #546e7a; }
+  .alias-item .inexistente { color: #ef9a9a; font-size: .8rem; font-style: italic; }
+  .alias-del { background: #4e2a2a; color: #ef9a9a; border: none; border-radius: 6px; padding: 4px 9px; font-size: .78rem; cursor: pointer; flex-shrink: 0; }
+  .alias-del:hover { background: #6d3a3a; }
+  .alias-chip { background: #1565c0; color: #fff; border-radius: 14px; padding: 3px 10px; font-size: .8rem; display: inline-flex; align-items: center; gap: 6px; }
+  .alias-chip button { background: none; border: none; color: #bbdefb; cursor: pointer; font-size: .95rem; line-height: 1; padding: 0; }
+  #alias-pesquisa-res div { padding: 7px 10px; cursor: pointer; border-radius: 6px; font-size: .85rem; color: #e0e0e0; }
+  #alias-pesquisa-res div:hover { background: #0f3460; }
+  #alias-pesquisa-res .ref { color: #546e7a; font-size: .78rem; }
+  #alias-vazio { color: #546e7a; font-size: .85rem; text-align: center; padding: 20px; }
   #status-dot { width: 10px; height: 10px; border-radius: 50%; background: #ffa726; animation: pulse 1s infinite; }
   #status-dot.ready { background: #66bb6a; animation: none; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
@@ -110,28 +125,46 @@
     <div id="status-dot"></div>
     <span id="status-txt">A carregar modelos…</span>
     <button class="btn-secondary" id="btn-modo-edicao" onclick="toggleModoEdicao()" style="padding:5px 10px; font-size:.8rem; margin-left:12px;" title="Mostra um botão Corrigir em todas as linhas, incluindo as já reconhecidas">✎ Corrigir tudo</button>
-    <button class="btn-secondary" onclick="abrirSettings()" style="padding:5px 10px; font-size:.8rem; margin-left:6px;">⚙ Definições</button>
+    <button class="btn-secondary" onclick="abrirAliases()" style="padding:5px 10px; font-size:.8rem; margin-left:6px;">🏷 Aliases</button>
     <a href="/logout" style="padding:5px 10px; font-size:.8rem; background:#37474f; color:#e0e0e0; border-radius:7px; text-decoration:none; margin-left:6px;">Sair</a>
   </div>
 </header>
 
 <div id="settings-modal">
-  <div id="settings-box">
-    <h3>Definições</h3>
-    <label>Anthropic API Key <span style="color:#546e7a;font-size:.78rem;">(opcional — melhora matches ambíguos)</span></label>
-    <div class="key-row">
-      <input id="api-key-input" type="password" placeholder="sk-ant-…">
-      <button class="btn-secondary" onclick="toggleShowKey()"></button>
+  <div id="settings-box" style="width:560px;">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px;">
+      <h3 style="margin:0;">🏷 Aliases</h3>
+      <button class="btn-primary" onclick="abrirCriarAlias()" style="padding:5px 12px; font-size:.82rem;">+ Criar alias novo</button>
     </div>
-    <div id="key-status"></div>
-    <hr style="border-color:#0f3460; margin:18px 0;">
-    <label>Utilizador do site <span style="color:#546e7a;font-size:.78rem;">(para proteger o acesso)</span></label>
-    <input id="app-username" type="text" placeholder="ex: admin" style="width:100%; padding:8px 12px; background:#0f3460; border:1px solid #1565c0; border-radius:7px; color:#e0e0e0; font-size:.88rem; margin-bottom:8px;">
-    <label>Password do site</label>
-    <input id="app-password" type="password" placeholder="••••••••" style="width:100%; padding:8px 12px; background:#0f3460; border:1px solid #1565c0; border-radius:7px; color:#e0e0e0; font-size:.88rem;">
-    <div class="settings-actions">
-      <button class="btn-secondary" onclick="fecharSettings()">Cancelar</button>
-      <button class="btn-primary" onclick="guardarSettings()">Guardar</button>
+
+    <!-- Abas -->
+    <div id="alias-tabs" style="display:flex; gap:4px; border-bottom:1px solid #0f3460; margin-bottom:12px;">
+      <button class="alias-tab active" data-aba="criados" onclick="trocarAba('criados')">Adicionados</button>
+      <button class="alias-tab" data-aba="aprendidos" onclick="trocarAba('aprendidos')">Temporários</button>
+    </div>
+
+    <!-- Lista de aliases -->
+    <div id="alias-lista" style="max-height:48vh; overflow-y:auto;"></div>
+
+    <!-- Formulário de criação (escondido por defeito) -->
+    <div id="alias-criar" style="display:none; border-top:1px solid #0f3460; margin-top:12px; padding-top:12px;">
+      <label>Expressão (o que escrevem na encomenda)</label>
+      <input id="alias-expressao" type="text" placeholder="ex: recargas drill"
+             style="width:100%; padding:8px 12px; background:#0f3460; border:1px solid #1565c0; border-radius:7px; color:#e0e0e0; font-size:.88rem; margin-bottom:10px;">
+      <label>Produtos da loja</label>
+      <div id="alias-produtos-sel" style="display:flex; flex-wrap:wrap; gap:6px; margin:6px 0;"></div>
+      <input id="alias-pesquisa" type="text" placeholder="Pesquisar produto na loja…" autocomplete="off"
+             style="width:100%; padding:8px 12px; background:#0f3460; border:1px solid #1565c0; border-radius:7px; color:#e0e0e0; font-size:.88rem;">
+      <div id="alias-pesquisa-res" style="max-height:160px; overflow-y:auto; margin-top:4px;"></div>
+      <div class="settings-actions">
+        <button class="btn-secondary" onclick="cancelarCriarAlias()">Cancelar</button>
+        <button class="btn-primary" onclick="guardarAlias()">Guardar alias</button>
+      </div>
+      <div id="alias-criar-status" style="font-size:.82rem; margin-top:6px;"></div>
+    </div>
+
+    <div class="settings-actions" id="alias-fechar-row">
+      <button class="btn-secondary" onclick="fecharSettings()">Fechar</button>
     </div>
   </div>
 </div>
@@ -525,51 +558,151 @@ function esconderLoading() {
   document.getElementById('loading-overlay').classList.remove('visible');
 }
 
-// ── Definições / API Key ──────────────────────────────────────
-async function abrirSettings() {
-  const r = await fetch('/config');
-  const d = await r.json();
-  const statusEl = document.getElementById('key-status');
-  statusEl.textContent = d.configured ? 'Chave já configurada.' : 'Sem chave configurada.';
-  statusEl.style.color = d.configured ? '#66bb6a' : '#ffa726';
-  document.getElementById('api-key-input').value = '';
+// ── Aliases ────────────────────────────────────────────────────
+let _aliasDados = { criados: {}, aprendidos: {} };
+let _abaAtual = 'criados';
+let _aliasSelecionados = [];   // produtos escolhidos no formulário de criação
+let _aliasTimer = null;
+
+async function abrirAliases() {
   document.getElementById('settings-modal').classList.add('visible');
+  cancelarCriarAlias();
+  await carregarAliases();
 }
 
 function fecharSettings() {
   document.getElementById('settings-modal').classList.remove('visible');
 }
 
-function toggleShowKey() {
-  const input = document.getElementById('api-key-input');
-  input.type = input.type === 'password' ? 'text' : 'password';
+async function carregarAliases() {
+  try {
+    const r = await fetch('/aliases');
+    _aliasDados = await r.json();
+  } catch (e) { _aliasDados = { criados: {}, aprendidos: {} }; }
+  renderAliasLista();
 }
 
-async function guardarSettings() {
-  const payload = {};
-  const key = document.getElementById('api-key-input').value.trim();
-  if (key) payload.api_key = key;
-  const username = document.getElementById('app-username').value.trim();
-  if (username) payload.app_username = username;
-  const password = document.getElementById('app-password').value.trim();
-  if (password) payload.app_password = password;
-  if (!Object.keys(payload).length) { fecharSettings(); return; }
-  const r = await fetch('/config', {
+function trocarAba(aba) {
+  _abaAtual = aba;
+  document.querySelectorAll('.alias-tab').forEach(b =>
+    b.classList.toggle('active', b.dataset.aba === aba));
+  renderAliasLista();
+}
+
+function renderAliasLista() {
+  const cont = document.getElementById('alias-lista');
+  const dados = _aliasDados[_abaAtual] || {};
+  const chaves = Object.keys(dados);
+  if (!chaves.length) {
+    cont.innerHTML = `<div id="alias-vazio">Sem aliases ${_abaAtual === 'criados' ? 'adicionados' : 'temporários'}.</div>`;
+    return;
+  }
+  cont.innerHTML = chaves.map(chave => {
+    const a = dados[chave];
+    let corpo;
+    if (a.inexistente) {
+      corpo = `<div class="inexistente">marcado como inexistente</div>`;
+    } else {
+      corpo = `<div class="prods">` + a.produtos.map(p =>
+        `${escapeHtml(p.produto)} <span class="ref">${p.ref || ''}</span>`).join(' · ') + `</div>`;
+    }
+    return `<div class="alias-item">
+      <div><div class="expr">${escapeHtml(chave)}</div>${corpo}</div>
+      <button class="alias-del" onclick="apagarAlias('${escapeAttr(chave)}')">Apagar</button>
+    </div>`;
+  }).join('');
+}
+
+async function apagarAlias(chave) {
+  if (!confirm(`Apagar o alias "${chave}"?`)) return;
+  await fetch('/aliases', {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ chave, aba: _abaAtual })
+  });
+  await carregarAliases();
+}
+
+// ── Criar alias ────────────────────────────────────────────────
+function abrirCriarAlias() {
+  _aliasSelecionados = [];
+  document.getElementById('alias-expressao').value = '';
+  document.getElementById('alias-pesquisa').value = '';
+  document.getElementById('alias-pesquisa-res').innerHTML = '';
+  document.getElementById('alias-criar-status').textContent = '';
+  renderSelecionados();
+  document.getElementById('alias-criar').style.display = 'block';
+  document.getElementById('alias-lista').style.display = 'none';
+  document.getElementById('alias-tabs').style.display = 'none';
+  document.getElementById('alias-fechar-row').style.display = 'none';
+  document.getElementById('alias-expressao').focus();
+}
+
+function cancelarCriarAlias() {
+  document.getElementById('alias-criar').style.display = 'none';
+  document.getElementById('alias-lista').style.display = 'block';
+  document.getElementById('alias-tabs').style.display = 'flex';
+  document.getElementById('alias-fechar-row').style.display = 'flex';
+}
+
+function renderSelecionados() {
+  document.getElementById('alias-produtos-sel').innerHTML = _aliasSelecionados.map((p, i) =>
+    `<span class="alias-chip">${escapeHtml(p.produto)}<button onclick="removerSelecionado(${i})">×</button></span>`
+  ).join('') || `<span style="color:#546e7a;font-size:.8rem;">Nenhum produto ainda.</span>`;
+}
+
+function removerSelecionado(i) { _aliasSelecionados.splice(i, 1); renderSelecionados(); }
+
+document.getElementById('alias-pesquisa').addEventListener('input', function() {
+  clearTimeout(_aliasTimer);
+  _aliasTimer = setTimeout(() => pesquisarParaAlias(this.value.trim()), 300);
+});
+
+async function pesquisarParaAlias(q) {
+  const res = document.getElementById('alias-pesquisa-res');
+  if (!q) { res.innerHTML = ''; return; }
+  res.innerHTML = `<div style="color:#9e9e9e;cursor:default;">A procurar…</div>`;
+  try {
+    const r = await fetch('/pesquisar_produto?q=' + encodeURIComponent(q));
+    const d = await r.json();
+    const hits = d.produtos || [];
+    res.innerHTML = hits.map(p =>
+      `<div data-prod="${escapeAttr(p.produto)}" data-ref="${escapeAttr(p.ref || '')}">${escapeHtml(p.produto)} <span class="ref">${p.ref || ''}</span></div>`
+    ).join('') || `<div style="color:#9e9e9e;cursor:default;">Sem resultados</div>`;
+    res.querySelectorAll('div[data-prod]').forEach(el => {
+      el.onclick = () => {
+        if (!_aliasSelecionados.some(p => p.produto === el.dataset.prod)) {
+          _aliasSelecionados.push({ produto: el.dataset.prod, ref: el.dataset.ref });
+          renderSelecionados();
+        }
+      };
+    });
+  } catch (e) { res.innerHTML = `<div style="color:#ef9a9a;">Erro na pesquisa</div>`; }
+}
+
+async function guardarAlias() {
+  const expressao = document.getElementById('alias-expressao').value.trim();
+  const status = document.getElementById('alias-criar-status');
+  if (!expressao) { status.textContent = 'Escreve a expressão.'; status.style.color = '#ef5350'; return; }
+  if (!_aliasSelecionados.length) { status.textContent = 'Adiciona pelo menos um produto.'; status.style.color = '#ef5350'; return; }
+  const r = await fetch('/aliases', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload)
+    body: JSON.stringify({ expressao, produtos: _aliasSelecionados.map(p => p.produto) })
   });
   const d = await r.json();
-  const statusEl = document.getElementById('key-status');
   if (d.ok) {
-    statusEl.textContent = 'Guardado com sucesso!';
-    statusEl.style.color = '#66bb6a';
-    setTimeout(fecharSettings, 1500);
+    _abaAtual = 'criados';
+    document.querySelectorAll('.alias-tab').forEach(b => b.classList.toggle('active', b.dataset.aba === 'criados'));
+    cancelarCriarAlias();
+    await carregarAliases();
   } else {
-    statusEl.textContent = d.error || 'Erro ao guardar.';
-    statusEl.style.color = '#ef5350';
+    status.textContent = d.erro || 'Erro ao guardar.'; status.style.color = '#ef5350';
   }
 }
+
+function escapeHtml(s) { return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function escapeAttr(s) { return (s || '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 
 document.getElementById('settings-modal').addEventListener('click', function(e) {
   if (e.target === this) fecharSettings();

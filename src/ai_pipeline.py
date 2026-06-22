@@ -13,6 +13,16 @@ from rapidfuzz import fuzz, process
 _UNIDADES_RE = r"(?:unid\w*|un|pcs?|cada)"
 
 
+def _alias_alvos(valor) -> list[str]:
+    """Produtos-alvo de um alias: aceita string (1) ou lista (vários). Marcadores
+    vazios ('' / __INEXISTENTE__) saem — significam 'ignorar a linha'."""
+    if isinstance(valor, list):
+        return [p for p in valor if p and p != "__INEXISTENTE__"]
+    if isinstance(valor, str) and valor and valor != "__INEXISTENTE__":
+        return [valor]
+    return []
+
+
 def _chave_nome(nome: str) -> str:
     """
     Chave canónica para comparar nomes de produto entre fontes (aliases escritos
@@ -222,8 +232,10 @@ def _extrair_texto_imagem(image_path: Path, client) -> str:
 def _construir_base_rag(exemplos: list, aliases: dict) -> list[dict]:
     """Constrói a base de conhecimento: todos os pares escrito→produto."""
     base = []
-    for escrito, produto in (aliases or {}).items():
-        base.append({"escrito": escrito, "produto": produto})
+    for escrito, valor in (aliases or {}).items():
+        alvos = _alias_alvos(valor)
+        if alvos:
+            base.append({"escrito": escrito, "produto": ", ".join(alvos)})
     for e in exemplos:
         escrito = e.get("escrito", "")
         if "produtos" in e:
@@ -280,8 +292,8 @@ def processar_texto(
     if not linhas_indexadas:
         return []
 
-    # Filtrar linhas com termos ignorados (alias com valor "")
-    _ignorar = {k for k, v in (aliases or {}).items() if v == ""}
+    # Filtrar linhas com termos ignorados (alias com valor "" ou sem alvos úteis)
+    _ignorar = {k for k, v in (aliases or {}).items() if not _alias_alvos(v)}
     linhas_indexadas = [
         (idx, linha)
         for idx, linha in linhas_indexadas
@@ -345,13 +357,14 @@ def processar_texto(
         por_chave = {_chave_nome(p): p for p in candidatos_score}
         for p in produtos:
             por_chave.setdefault(_chave_nome(p), p)
-        for alias, produto in aliases.items():
+        for alias, valor in aliases.items():
             if not _alias_no_texto(_chave_nome(alias), texto_chave):
                 continue
-            real = por_chave.get(_chave_nome(produto))
-            if real:
-                candidatos_score[real] = max(candidatos_score.get(real, 0), 100)
-                produtos_via_alias.add(real)
+            for produto in _alias_alvos(valor):
+                real = por_chave.get(_chave_nome(produto))
+                if real:
+                    candidatos_score[real] = max(candidatos_score.get(real, 0), 100)
+                    produtos_via_alias.add(real)
 
     cap = max(60, min(len(linhas) * 8, 180))
     candidatos = [
