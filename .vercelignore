@@ -1,0 +1,26 @@
+# Ambiente local e caches — nunca para produção
+.conda
+.git
+__pycache__
+**/__pycache__
+.vscode
+*.pyc
+
+# Artefactos de ML (modo local apenas; produção não usa)
+data/model_finetuned
+data/emb_prod.npy
+data/prod.pkl
+data/sku_map.pkl
+data/prod_meta.json
+
+# Catálogo vem da Shopkit em runtime; cache e logs não são precisos no bundle
+data/catalogo_cache.json
+data/nao_reconhecidas.jsonl
+
+# Notebooks, input/output de teste
+notebooks
+input
+output
+
+# Dependências pesadas só do modo local
+requirements_local.txt

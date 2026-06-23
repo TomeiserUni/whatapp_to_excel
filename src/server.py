@@ -17,7 +17,8 @@ from pathlib import Path
 from flask import Flask, jsonify, redirect, render_template, request, send_file, session
 
 # ── Ambiente ─────────────────────────────────────────────────────
-IS_CLOUD  = bool(os.environ.get("RAILWAY_ENVIRONMENT") or os.environ.get("RENDER"))
+IS_CLOUD  = bool(os.environ.get("RAILWAY_ENVIRONMENT") or os.environ.get("RENDER")
+                 or os.environ.get("VERCEL"))
 IS_FROZEN = getattr(sys, "frozen", False)
 
 # ── Caminhos ─────────────────────────────────────────────────────
@@ -1804,6 +1805,16 @@ def exportar():
     buf.seek(0)
     return send_file(buf, as_attachment=True, download_name="resultados.xlsx",
                      mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+# Em serverless (Vercel) o módulo é importado e a app servida diretamente — o
+# bloco __main__ nunca corre, por isso o pipeline tem de carregar no import.
+# Síncrono: a 1ª invocação espera o catálogo, mas garante que _pipeline existe.
+if os.environ.get("VERCEL") and _pipeline is None:
+    try:
+        _load_pipeline()
+    except Exception as e:
+        print(f"[serverless] falha ao carregar pipeline no import: {e}")
 
 
 # ── Main ──────────────────────────────────────────────────────────
