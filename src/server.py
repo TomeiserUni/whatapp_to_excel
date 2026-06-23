@@ -534,7 +534,13 @@ def _expandir_aliases_diretos(linhas: list[str], aliases: dict, sku_map: dict) -
                 # do alias forem insignificantes.
                 if len(palavras_alias) >= 2:
                     resto = (linha_norm[:m_alias.start()] + " " + linha_norm[m_alias.end():])
-                    extra = [w for w in resto.split() if not w.isdigit() and len(w) >= 3]
+                    # "extra" = palavras de PRODUTO a mais (ignora quantidade e
+                    # palavras de unidade como 'unidades'/'cada' — senão "cores
+                    # novas 12 unidades cada" parecia ter contexto a mais e o alias
+                    # não disparava).
+                    extra = [w for w in resto.split()
+                             if not w.isdigit() and len(w) >= 3
+                             and not re.fullmatch(_UNIDADES_RE, w, flags=re.IGNORECASE)]
                     if len(extra) >= 2:
                         continue  # linha tem contexto a mais → deixa a AI decidir
             elif len(palavras_alias) >= 2 and not any(p.isdigit() for p in palavras_alias):
