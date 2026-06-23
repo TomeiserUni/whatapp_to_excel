@@ -9,3 +9,4 @@ data/nao_reconhecidas.jsonl
 * 2.*
 # Cache do catálogo Shopkit — gerada em runtime, não versionar
 data/catalogo_cache.json
+.vercel
