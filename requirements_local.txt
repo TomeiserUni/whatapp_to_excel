@@ -1,0 +1,19 @@
+# Dependências do modo LOCAL com ML (OCR de imagens + embeddings) e a GUI desktop.
+# NÃO usadas em produção (Vercel/Render usam o requirements.txt leve).
+# Instala à mão quando precisares do pipeline ML local:
+#   pip install -r requirements_local.txt
+flask
+waitress
+openai
+easyocr==1.7.2
+sentence-transformers==5.4.0
+customtkinter==5.2.2
+tkinterdnd2==0.4.3
+rapidfuzz==3.14.5
+openpyxl==3.1.5
+numpy
+Pillow
+requests
+beautifulsoup4
+python-dotenv
+anthropic
