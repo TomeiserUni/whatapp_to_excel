@@ -414,6 +414,16 @@ def processar_texto(
         "Se há vários números possíveis (30ml, 50ml, ambos existem), NÃO troques — devolve "
         "o que o cliente pediu se existir, senão ignora.\n"
         "• Palavras a mais/a menos: 'brigadeiro' = 'verniz gel brigadeiro natura' (abreviação).\n"
+        "• O NOME do catálogo pode ter palavras descritivas que o cliente não escreve "
+        "(linha de produto, acabamento). Se TODAS as palavras distintivas que o cliente "
+        "escreveu estão no nome de UM ÚNICO candidato, aceita mesmo que esse nome tenha "
+        "palavras extra. Ex: 'top coat branco leitoso' → 'top coat milky branco leitoso' "
+        "(falta só 'milky', e é o único top coat branco leitoso); 'cola soft tips' → "
+        "'kit soft gel tips' (única opção com 'soft' e 'tips'). MAS se as palavras do "
+        "cliente batem em VÁRIOS candidatos (ex: 'pincel gel' → vários pincéis; 'acrigel' "
+        "sozinho → vários polyacrygel), NÃO escolhas nenhum — é genérico, ignora a linha.\n"
+        "• Variantes de grafia/fonética de nomes próprios contam como typo: 'kioto'='kyoto', "
+        "'cateye'='cat eye', 'tea three'='tea tree'. Aceita se sobrar UM candidato claro.\n"
         "\n"
         "Linhas-contexto a ignorar: 'Verniz normal', 'Cores novas ...', 'De cada' isolado, "
         "saudações ('bom dia'…), 'encomenda', 'pedido'.\n"
@@ -507,6 +517,21 @@ def _produto_referenciado_na_linha(produto: str, linha: str, genericas: set[str]
         return False
 
     palavras_produto = re.findall(r"\w+", produto.lower())
+    palavras_produto_set = set(palavras_produto)
+
+    # Caso de nome abreviado: o cliente escreveu menos palavras que o nome do
+    # catálogo, mas TODAS as que escreveu (não-estruturais, ≥3 letras) aparecem
+    # EXATAMENTE no produto. Ex: 'removedor calosidades' → 'removedor de
+    # calosidades e cutículas 250'. É match legítimo — a AI escolheu e o cliente
+    # não inventou palavras. Exige-se igualdade exata (sem fuzzy) para não aceitar
+    # 'cabra cega' como 'morangão' nem 'base rosa' como 'gummy base nude'.
+    palavras_cliente = [
+        t for t in linha_tokens
+        if t.isalpha() and len(t) >= 3 and t not in _PALAVRAS_ESTRUTURAIS
+    ]
+    if len(palavras_cliente) >= 2 and all(c in palavras_produto_set for c in palavras_cliente):
+        return True
+
     distintivas_alfa = [t for t in palavras_produto if t.isalpha() and len(t) >= 3 and t not in genericas]
     distintivas_num  = [t for t in palavras_produto if not t.isalpha() and any(c.isdigit() for c in t)]
 

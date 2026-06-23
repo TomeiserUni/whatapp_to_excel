@@ -182,6 +182,14 @@ _GENERICOS_SO_CONTEXTO = {
     "cores novas", "verniz normal", "verniz gel", "verniz gel cateye",
 }
 
+# Termos genéricos que, SOZINHOS (sem número de variante nem cor a seguir),
+# não chegam para escolher um produto — há demasiadas variantes. Ex: "acrigel"
+# sozinho (há 11 polyacrygel), "pincel gel" (vários pincéis). Com número/variante
+# ("acrigel 7", "pincel gel precision") deixam de ser genéricos e seguem normal.
+_GENERICOS_SEM_NUMERO = {
+    "acrigel", "polyacrygel", "pincel gel",
+}
+
 
 def _tem_alias_para_linha(linha: str) -> bool:
     """
@@ -192,11 +200,21 @@ def _tem_alias_para_linha(linha: str) -> bool:
     chave = _normalizar_para_tendencia(linha)
     if not chave:
         return False
-    if chave in _carregar_aliases_criados():
-        return True
-    # Aprendidos só contam se apontarem para um produto real (não __INEXISTENTE__).
-    valor = _carregar_aliases_aprendidos().get(chave)
-    return bool(_alias_produtos(valor))
+    # Tenta a chave tal qual e também sem "de cada"/"de" residual (a normalização
+    # tira "cada" como unidade, deixando "cores novas de"); o alias é "cores
+    # novas", o "de cada" só define a quantidade.
+    chave_sem_decada = re.sub(r"\bde\s+cada\b|\bde\b", " ", chave)
+    chave_sem_decada = re.sub(r"\s+", " ", chave_sem_decada).strip()
+    chaves = {chave, chave_sem_decada}
+    criados = _carregar_aliases_criados()
+    aprendidos = _carregar_aliases_aprendidos()
+    for ch in chaves:
+        if ch in criados:
+            return True
+        # Aprendidos só contam se apontarem para um produto real (não __INEXISTENTE__).
+        if _alias_produtos(aprendidos.get(ch)):
+            return True
+    return False
 
 
 def _linha_so_contexto(linha: str) -> bool:
@@ -209,6 +227,16 @@ def _linha_so_contexto(linha: str) -> bool:
     # Um alias criado/aprendido para esta linha anula a regra de contexto.
     if _tem_alias_para_linha(linha):
         return False
+    # Genérico sozinho (sem nº de variante): "acrigel" sim, "acrigel 7" não.
+    # Tira-se só a QUANTIDADE (número+unidade); se ainda sobrar um dígito, é um
+    # número de variante e a linha não é genérica.
+    sem_quantidade = re.sub(rf"\b\d+\s*{_UNIDADES_RE}\b", " ", lower, flags=re.IGNORECASE)
+    sem_quantidade = re.sub(r"\bde cada\b", " ", sem_quantidade)
+    sem_quantidade = re.sub(rf"\b{_UNIDADES_RE}\b", " ", sem_quantidade)  # 'cada'/'un' soltos
+    sem_quantidade = re.sub(r"[^\w\s]", " ", sem_quantidade)
+    sem_quantidade = re.sub(r"\s+", " ", sem_quantidade).strip()
+    if sem_quantidade in _GENERICOS_SEM_NUMERO:
+        return True
     return (
         lower in {"de cada"} or lower_sem_qtd in _GENERICOS_SO_CONTEXTO
         or lower.startswith(("bom dia", "boa tarde", "boa noite"))
@@ -494,20 +522,39 @@ def _expandir_aliases_diretos(linhas: list[str], aliases: dict, sku_map: dict) -
             alias_norm = _normalizar_token(alias)
             if not alias_norm:
                 continue
-            m_alias = re.search(rf"(?<!\w){re.escape(alias_norm)}(?!\w)", linha_norm)
-            if not m_alias:
-                continue
-
-            # Aliases multi-palavra genéricos (ex: "rosa leitoso") não devem
-            # disparar quando são só um pedaço de um produto maior na linha
-            # (ex: "fiber base rosa leitoso cintilante" → deve ir à AI). Só
-            # aplica se as palavras da linha fora do alias forem insignificantes.
             palavras_alias = alias_norm.split()
-            if len(palavras_alias) >= 2:
-                resto = (linha_norm[:m_alias.start()] + " " + linha_norm[m_alias.end():])
-                extra = [w for w in resto.split() if not w.isdigit() and len(w) >= 3]
-                if len(extra) >= 2:
-                    continue  # linha tem contexto a mais → deixa a AI decidir
+            m_alias = re.search(rf"(?<!\w){re.escape(alias_norm)}(?!\w)", linha_norm)
+
+            if m_alias:
+                # Match contíguo (ordem exata). Aliases multi-palavra genéricos
+                # (ex: "rosa leitoso") não devem disparar quando são só um pedaço
+                # de um produto maior na linha (ex: "fiber base rosa leitoso
+                # cintilante" → vai à AI). Só aplica se as palavras da linha fora
+                # do alias forem insignificantes.
+                if len(palavras_alias) >= 2:
+                    resto = (linha_norm[:m_alias.start()] + " " + linha_norm[m_alias.end():])
+                    extra = [w for w in resto.split() if not w.isdigit() and len(w) >= 3]
+                    if len(extra) >= 2:
+                        continue  # linha tem contexto a mais → deixa a AI decidir
+            elif len(palavras_alias) >= 2 and not any(p.isdigit() for p in palavras_alias):
+                # Sem match contíguo: tenta ORDEM TROCADA ("cateye cores" =
+                # "cores cateye"). Só para aliases SEM números (um número do alias
+                # é um identificador posicional e não deve ser reordenado, nem
+                # confundido com a quantidade da linha). Todas as palavras do alias
+                # têm de estar na linha e a linha não pode ter outras palavras
+                # significativas (fora a quantidade) — senão é um produto diferente.
+                palavras_linha = linha_norm.split()
+                if not all(p in palavras_linha for p in palavras_alias):
+                    continue
+                extra = [w for w in palavras_linha
+                         if w not in palavras_alias and not w.isdigit()
+                         and len(w) >= 3 and not re.fullmatch(_UNIDADES_RE, w)]
+                if extra:
+                    continue  # palavras a mais → deixa a AI decidir
+                # m_alias "virtual" na última palavra do alias (a qty é tratada à parte).
+                m_alias = re.search(re.escape(palavras_alias[-1]), linha_norm)
+            else:
+                continue
 
             # Quantidade do produto. Uma qty com unidade EXPLÍCITA na linha
             # ("12 unidades", "6 un") é a quantidade deste produto, esteja onde
@@ -517,22 +564,40 @@ def _expandir_aliases_diretos(linhas: list[str], aliases: dict, sku_map: dict) -
             # (a qty costuma vir antes: "2 like gel 104"); números soltos depois
             # pertencem a outros produtos da linha.
             nums_alias = set(re.findall(r"\d+", alias_norm))
-            m_qty_unidade = re.search(
-                rf"\b(\d+)\s*{_UNIDADES_RE}\b", linha_norm, flags=re.IGNORECASE,
-            )
-            if m_qty_unidade and m_qty_unidade.group(1) not in nums_alias:
-                qtd = int(m_qty_unidade.group(1))
+            # Padrão "N de cada" (ex: "pincel gel 7 de cada" → 7): a quantidade é
+            # N para cada produto do alias. Tratado antes do resto.
+            if "de cada" in linha_norm:
+                qtd = _quantidade_de_cada(linha_norm)
+            # Uma qty com unidade explícita DEPOIS do alias é a quantidade deste
+            # produto, mesmo que o número coincida com o do alias ("acrigel 6 6
+            # unidades" → 6; "acrigel 7 7 un" → 7). Procura-se só a partir do fim
+            # do alias para não confundir o nº-identificador do próprio alias.
+            elif (m_qty_pos := re.search(
+                rf"\b(\d+)\s*{_UNIDADES_RE}\b", linha_norm[m_alias.end():], flags=re.IGNORECASE,
+            )):
+                qtd = int(m_qty_pos.group(1))
             else:
-                qtd = _quantidade_linha(linha_norm[:m_alias.end()], ignorar=nums_alias)
+                # Sem unidade depois: procura na linha toda, mas ignora os números
+                # do alias (que são identificadores, não quantidade).
+                m_qty_unidade = re.search(
+                    rf"\b(\d+)\s*{_UNIDADES_RE}\b", linha_norm, flags=re.IGNORECASE,
+                )
+                if m_qty_unidade and m_qty_unidade.group(1) not in nums_alias:
+                    qtd = int(m_qty_unidade.group(1))
+                else:
+                    qtd = _quantidade_linha(linha_norm[:m_alias.end()], ignorar=nums_alias)
             # Um alias pode expandir para vários produtos (ex: "recargas drill" →
-            # 3 lixas); todos recebem a mesma quantidade da linha.
+            # 3 lixas); todos recebem a mesma quantidade da linha. Resolve-se o
+            # nome para o do catálogo (caixa/acentos), para apanhar ref e bater no
+            # matching mesmo quando o alias foi gravado com maiúsculas.
             for produto in produtos_alias:
+                real = _nome_canonico_catalogo(produto)
                 resultados.append({
                     "ficheiro":     "texto colado",
-                    "produto":      produto,
+                    "produto":      real,
                     "qtd":          qtd,
                     "score":        1.0,
-                    "ref":          sku_map.get(produto, ""),
+                    "ref":          sku_map.get(real, ""),
                     "texto_origem": f"linha {idx}: {linha}",
                     "_linha_idx":   idx,
                 })
@@ -620,6 +685,55 @@ def _expandir_regras_de_cada(linhas: list[str], sku_map: dict) -> list[dict]:
 
         qty = _quantidade_de_cada(linha)
         for produto in produtos_moldes_f1:
+            resultados.append({
+                "ficheiro":     "texto colado",
+                "produto":      produto,
+                "qtd":          qty,
+                "score":        1.0,
+                "ref":          sku_map.get(produto, ""),
+                "texto_origem": f"linha {idx}: {linha}",
+                "_linha_idx":   idx,
+            })
+    return resultados
+
+
+def _expandir_cores_categoria(linhas: list[str], produtos: list[str], sku_map: dict) -> list[dict]:
+    """
+    "cores <categoria>" (ou "<categoria> cores") → TODOS os produtos cujo nome
+    contém essa categoria. Ex: "cores cateye 6 unidades" → os 22 verniz gel
+    cateye; "cores polyacrygel de cada" → todos os polyacrygel. Dinâmico: lê o
+    catálogo na hora, não precisa de listar à mão. A quantidade é a da linha.
+    """
+    resultados = []
+    for idx, linha in enumerate(linhas, 1):
+        norm = _normalizar_token(linha)
+        # Tira a quantidade (número + unidade / de cada) para isolar "cores X".
+        sem_qtd = re.sub(rf"\b\d+\s*{_UNIDADES_RE}\b", " ", norm, flags=re.IGNORECASE)
+        sem_qtd = re.sub(r"\bde cada\b", " ", sem_qtd)
+        sem_qtd = re.sub(rf"\b{_UNIDADES_RE}\b", " ", sem_qtd)
+        sem_qtd = re.sub(r"\b\d+\b", " ", sem_qtd)
+        sem_qtd = re.sub(r"\s+", " ", sem_qtd).strip()
+        palavras = sem_qtd.split()
+        if "cores" not in palavras or len(palavras) < 2:
+            continue
+        # A categoria é o resto das palavras (sem "cores"), em qualquer ordem.
+        categoria = [p for p in palavras if p != "cores"]
+        if not categoria:
+            continue
+        # "cores X" = as CORES de verniz gel dessa categoria. Só produtos cujo nome
+        # começa por "verniz gel" e contém todas as palavras da categoria —
+        # exclui boxes, ímanes, kits e outros acessórios com a mesma palavra.
+        correspondem = [
+            p for p in produtos
+            if _normalizar_token(p).startswith("verniz gel")
+            and all(cat in _normalizar_token(p) for cat in categoria)
+        ]
+        # Só dispara se for uma categoria com várias cores (>=2) — senão é um
+        # produto específico e deixa-se às outras regras / AI.
+        if len(correspondem) < 2:
+            continue
+        qty = _quantidade_de_cada(linha) if "de cada" in linha.lower() else _quantidade_linha(linha)
+        for produto in correspondem:
             resultados.append({
                 "ficheiro":     "texto colado",
                 "produto":      produto,
@@ -1040,6 +1154,34 @@ def _catalogo_produtos() -> tuple[list, dict]:
     return produtos, sku_map
 
 
+# Índice {chave canónica → nome real do catálogo}, construído uma vez por lista
+# de produtos (reconstruído quando o catálogo muda de identidade).
+_indice_canonico: dict[str, str] = {}
+_indice_canonico_para: list | None = None
+
+
+def _nome_canonico_catalogo(nome: str) -> str:
+    """
+    Devolve o nome EXATO do catálogo correspondente a ``nome`` (ignorando caixa,
+    acentos e pontuação, via _chave_nome do ai_pipeline). Se não houver match,
+    devolve o nome como veio. Garante que aliases usam o nome real do catálogo,
+    para baterem no matching e terem ref — mesmo que escritos com maiúsculas
+    ("Verniz Gel Fada" → "verniz gel fada").
+    """
+    global _indice_canonico, _indice_canonico_para
+    produtos, _ = _catalogo_produtos()
+    if not produtos:
+        return nome
+    ai_pl = _pipeline.get("ai_pl") if _pipeline else None
+    chave_fn = getattr(ai_pl, "_chave_nome", None)
+    if not chave_fn:
+        return nome
+    if _indice_canonico_para is not produtos:  # catálogo mudou → reconstrói
+        _indice_canonico = {chave_fn(p): p for p in produtos}
+        _indice_canonico_para = produtos
+    return _indice_canonico.get(chave_fn(nome), nome)
+
+
 @app.route("/produtos")
 @login_required
 def produtos():
@@ -1158,23 +1300,28 @@ def aprender_alias():
     texto = (dados.get("texto") or "").strip()
     produto = (dados.get("produto") or "").strip()
     ref_enviada = (dados.get("ref") or "").strip()
-    if not texto or not produto:
-        return jsonify({"ok": False, "erro": "texto e produto são obrigatórios"}), 400
+    if not produto:
+        return jsonify({"ok": False, "erro": "produto é obrigatório"}), 400
 
     chave = _normalizar_para_tendencia(texto)
-    if not chave:
-        return jsonify({"ok": False, "erro": "texto sem conteúdo útil"}), 400
+    # Sem chave útil (linha só com quantidade/pontuação, ex: "12 unidades") não há
+    # alias a aprender — mas a correção não deve falhar: aplica-se só o produto à
+    # linha. Resolve-se a ref na mesma para o Excel ficar completo.
+    _, sku_map = _catalogo_produtos()
 
     if produto == INEXISTENTE:
-        # A colega marcou que este texto não existe na loja.
+        if not chave:
+            return jsonify({"ok": True, "chave": "", "inexistente": True, "sem_alias": True})
         _gravar_alias_aprendido(chave, INEXISTENTE)
         _aplicar_aliases_aprendidos()
         return jsonify({"ok": True, "chave": chave, "inexistente": True})
 
     # Produto pode vir do catálogo local ou de uma pesquisa ao vivo na API.
     # A ref do catálogo tem prioridade; senão usa-se a que veio da pesquisa.
-    _, sku_map = _catalogo_produtos()
     ref = sku_map.get(produto) or ref_enviada
+
+    if not chave:
+        return jsonify({"ok": True, "chave": "", "produto": produto, "ref": ref, "sem_alias": True})
 
     _gravar_alias_aprendido(chave, produto)
     _aplicar_aliases_aprendidos()
@@ -1246,6 +1393,11 @@ def criar_alias():
     produtos = [p.strip() for p in (dados.get("produtos") or []) if (p or "").strip()]
     if not expressao or not produtos:
         return jsonify({"ok": False, "erro": "expressão e pelo menos um produto são obrigatórios"}), 400
+
+    # Normaliza cada produto-alvo para o nome EXATO do catálogo (mesma caixa e
+    # acentos). Sem isto, um nome com maiúsculas ("Verniz Gel Fada") não bate com
+    # o catálogo ("verniz gel fada") e fica sem ref / sem match no pipeline.
+    produtos = [_nome_canonico_catalogo(p) for p in produtos]
 
     # Várias expressões separadas por vírgula → várias chaves para os mesmos produtos.
     chaves = []
@@ -1467,15 +1619,21 @@ def processar_texto():
         # 1) Regras PLN sobre todas as linhas
         alias_rows = _expandir_aliases_diretos(linhas, aliases_t, sku_final)
         resultados.extend(alias_rows)
+        linhas_alias = {r["_linha_idx"] for r in alias_rows}
+        # "cores <categoria>" → todos os produtos dessa categoria (só nas linhas que
+        # um alias direto não cobriu — um alias específico tem prioridade).
+        cores_cat = [r for r in _expandir_cores_categoria(linhas, prods_t, sku_final)
+                     if r["_linha_idx"] not in linhas_alias]
+        resultados.extend(cores_cat)
+        linhas_cores = {r["_linha_idx"] for r in cores_cat}
         resultados.extend(_expandir_referencias_sku(linhas, sku_final))
         brocas = _expandir_brocas_numeradas(linhas, prods_t, sku_final)
         resultados.extend(brocas)
         # Linhas já resolvidas por um alias direto não devem ser "enriquecidas" por
         # outras regras (ex: alias "cores novas" → 6 cores; sem isto o identificador
         # único apanhava "nova" e juntava "verniz gel maria nova iorque").
-        linhas_alias = {r["_linha_idx"] for r in alias_rows}
         linhas_brocas = {r["_linha_idx"] for r in brocas}
-        resultados.extend(_expandir_identificadores_unicos(linhas, prods_t, sku_final, ignorar_linhas=linhas_brocas | linhas_alias))
+        resultados.extend(_expandir_identificadores_unicos(linhas, prods_t, sku_final, ignorar_linhas=linhas_brocas | linhas_alias | linhas_cores))
         resultados.extend(_expandir_lista_variantes_numeradas(linhas, prods_t, sku_final))
         resultados.extend(_expandir_regras_de_cada(linhas, sku_final))
 
@@ -1547,6 +1705,11 @@ def processar_texto():
                     origem = _melhor_linha_origem(p, b, _rfuzz, prods_t)
                     linha_idx = _linha_idx(linhas, origem)
                     texto_orig = _linha_origem(linhas, origem)
+                # Padrão "N de cada": a quantidade é N para todos os produtos da
+                # linha, mas a AI às vezes devolve 1. Força-se determinì­sticamente.
+                linha_orig = linhas[linha_idx - 1] if linha_idx and 1 <= linha_idx <= len(linhas) else ""
+                if "de cada" in linha_orig.lower():
+                    q = _quantidade_de_cada(linha_orig)
                 resultados.append({
                     "ficheiro":     "texto colado",
                     "produto":      p,
@@ -1617,25 +1780,20 @@ def exportar():
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Resultados"
-    ws.append(["Referência", "Produto", "Quantidade", "Onde foi identificado", "Texto reconhecido"])
+    ws.append(["Referência", "Quantidade", "Produto", "Linha onde foi encontrado"])
     for cell in ws[1]:
         cell.font = Font(bold=True)
     ws.column_dimensions["A"].width = 15
-    ws.column_dimensions["B"].width = 55
-    ws.column_dimensions["C"].width = 12
-    ws.column_dimensions["D"].width = 34
-    ws.column_dimensions["E"].width = 60
+    ws.column_dimensions["B"].width = 12
+    ws.column_dimensions["C"].width = 55
+    ws.column_dimensions["D"].width = 60
 
     for row in data:
         produto = row.get("produto", "")
         score   = float(row.get("score", 0))
         texto   = row.get("texto_origem", "")
-        ficheiro = row.get("ficheiro", "")
-        onde = ficheiro
-        if texto:
-            onde = f"{ficheiro} - {texto}" if ficheiro else texto
         label   = produto if produto else "ERRO — produto não identificado"
-        ws.append([row.get("ref", ""), label, row.get("qtd", ""), onde, texto])
+        ws.append([row.get("ref", ""), row.get("qtd", ""), label, texto])
         fill = _fill(score, produto)
         for cell in ws[ws.max_row]:
             cell.fill = fill

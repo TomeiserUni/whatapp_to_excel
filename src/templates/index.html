@@ -7,6 +7,9 @@
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: 'Segoe UI', sans-serif; background: #1a1a2e; color: #e0e0e0; min-height: 100vh; display: flex; flex-direction: column; }
+  /* Com um modal aberto, bloqueia o scroll da página de fundo: só a lista
+     dentro do modal desliza, a tabela atrás fica imóvel. */
+  body.modal-aberto { overflow: hidden; }
 
   header { background: #16213e; padding: 14px 24px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #0f3460; position: sticky; top: 0; z-index: 100; }
   header h1 { font-size: 1.2rem; color: #4fc3f7; font-weight: 600; }
@@ -706,12 +709,14 @@ let _aliasEditando = null;     // chave original em edição (null = criação n
 
 async function abrirAliases() {
   document.getElementById('settings-modal').classList.add('visible');
+  document.body.classList.add('modal-aberto');
   cancelarCriarAlias();
   await carregarAliases();
 }
 
 function fecharSettings() {
   document.getElementById('settings-modal').classList.remove('visible');
+  document.body.classList.remove('modal-aberto');
 }
 
 async function carregarAliases() {

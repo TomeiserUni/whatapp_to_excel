@@ -6,5 +6,22 @@
     "verniz gel cateye aloha",
     "verniz gel cateye mahalo",
     "verniz gel cateye hula"
-  ]
+  ],
+  "verniz gel novos": [
+    "verniz gel cateye kai",
+    "verniz gel cateye lau",
+    "verniz gel cateye ohana",
+    "verniz gel cateye aloha",
+    "verniz gel cateye mahalo",
+    "verniz gel cateye hula"
+  ],
+  "pincel gel": [
+    "pincel gel precision",
+    "pincel solid gel",
+    "pincel builder gel nº6",
+    "pincel builder gel nº2",
+    "pincel builder gel nº4"
+  ],
+  "base fibra transparente": "fiber base gel transparente",
+  "fiber base clear": "fiber base gel transparente"
 }
