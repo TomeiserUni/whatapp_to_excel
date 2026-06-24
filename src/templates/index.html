@@ -157,6 +157,11 @@
       <button class="alias-tab" data-aba="varios" onclick="trocarAba('varios')">Vários produtos</button>
     </div>
 
+    <!-- Aviso de só-leitura (Vercel) -->
+    <div id="alias-aviso-leitura" style="display:none; background:#3a2f12; border:1px solid #6d5616; color:#ffd479; border-radius:7px; padding:8px 12px; margin-bottom:10px; font-size:.82rem;">
+      ⚠ Esta versão é só de consulta. Para criar ou editar abreviações, usa o site no Render.
+    </div>
+
     <!-- Lista de aliases -->
     <div id="alias-lista" style="max-height:48vh; overflow-y:auto;"></div>
 
@@ -736,6 +741,13 @@ function trocarAba(aba) {
 
 function renderAliasLista() {
   const cont = document.getElementById('alias-lista');
+  const soLeitura = !!_aliasDados.somente_leitura;
+  // Em modo só-leitura (Vercel) esconde o botão "+ Criar" e mostra um aviso.
+  const btnCriar = document.querySelector('#alias-cabecalho .btn-primary');
+  if (btnCriar) btnCriar.style.display = soLeitura ? 'none' : '';
+  const aviso = document.getElementById('alias-aviso-leitura');
+  if (aviso) aviso.style.display = soLeitura ? 'block' : 'none';
+
   const grupos = _aliasDados[_abaAtual] || [];
   if (!grupos.length) {
     const txt = _abaAtual === 'unico' ? 'de produto único' : 'de vários produtos';
@@ -746,12 +758,13 @@ function renderAliasLista() {
     const expr = g.chaves.map(escapeHtml).join(', ');
     const corpo = `<div class="prods">` + g.produtos.map(p =>
       `${escapeHtml(p.produto)} <span class="ref">${p.ref || ''}</span>`).join(' · ') + `</div>`;
-    return `<div class="alias-item">
-      <div><div class="expr">${expr}</div>${corpo}</div>
+    const acoes = soLeitura ? '' : `
       <div class="alias-acoes">
         <button class="alias-edit" onclick="editarAlias(${i})">Editar</button>
         <button class="alias-del" onclick="apagarAlias(${i})">Apagar</button>
-      </div>
+      </div>`;
+    return `<div class="alias-item">
+      <div><div class="expr">${expr}</div>${corpo}</div>${acoes}
     </div>`;
   }).join('');
 }

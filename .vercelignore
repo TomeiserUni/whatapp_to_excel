@@ -13,10 +13,6 @@ data/prod.pkl
 data/sku_map.pkl
 data/prod_meta.json
 
-# Catálogo vem da Shopkit em runtime; cache e logs não são precisos no bundle
-data/catalogo_cache.json
-data/nao_reconhecidas.jsonl
-
 # Notebooks, input/output de teste
 notebooks
 input

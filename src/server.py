@@ -19,6 +19,10 @@ from flask import Flask, jsonify, redirect, render_template, request, send_file,
 # ── Ambiente ─────────────────────────────────────────────────────
 IS_CLOUD  = bool(os.environ.get("RAILWAY_ENVIRONMENT") or os.environ.get("RENDER")
                  or os.environ.get("VERCEL"))
+# Na Vercel (serverless) o filesystem é só-leitura, por isso não se podem gravar
+# abreviações. Geram-se/editam-se no Render (disco persistente) e versionam-se no
+# git. Aqui a janela de Abreviações fica em modo leitura.
+SOMENTE_LEITURA = bool(os.environ.get("VERCEL"))
 IS_FROZEN = getattr(sys, "frozen", False)
 
 # ── Caminhos ─────────────────────────────────────────────────────
@@ -1316,8 +1320,10 @@ def aprender_alias():
     # linha. Resolve-se a ref na mesma para o Excel ficar completo.
     _, sku_map = _catalogo_produtos()
 
+    # Em modo só-leitura (Vercel) a correção AINDA aplica o produto à linha (para o
+    # Excel ficar certo nesta sessão), mas não grava o alias — o disco é read-only.
     if produto == INEXISTENTE:
-        if not chave:
+        if not chave or SOMENTE_LEITURA:
             return jsonify({"ok": True, "chave": "", "inexistente": True, "sem_alias": True})
         _gravar_alias_aprendido(chave, INEXISTENTE)
         _aplicar_aliases_aprendidos()
@@ -1327,7 +1333,7 @@ def aprender_alias():
     # A ref do catálogo tem prioridade; senão usa-se a que veio da pesquisa.
     ref = sku_map.get(produto) or ref_enviada
 
-    if not chave:
+    if not chave or SOMENTE_LEITURA:
         return jsonify({"ok": True, "chave": "", "produto": produto, "ref": ref, "sem_alias": True})
 
     _gravar_alias_aprendido(chave, produto)
@@ -1383,7 +1389,13 @@ def listar_aliases():
         (unico if len(g["produtos"]) == 1 else varios).append(entrada)
     unico.sort(key=lambda e: e["chaves"][0])
     varios.sort(key=lambda e: e["chaves"][0])
-    return jsonify({"unico": unico, "varios": varios})
+    return jsonify({"unico": unico, "varios": varios, "somente_leitura": SOMENTE_LEITURA})
+
+
+_ERRO_SO_LEITURA = (
+    "Esta versão (Vercel) é só de leitura — o disco não permite gravar. "
+    "Cria/edita as abreviações no Render."
+)
 
 
 @app.route("/aliases", methods=["POST"])
@@ -1395,6 +1407,8 @@ def criar_alias():
     ("cores novas, novos verniz gel"): cada uma vira uma abreviação para o MESMO
     conjunto de produtos. Cada chave é normalizada (sem quantidade/pontuação).
     """
+    if SOMENTE_LEITURA:
+        return jsonify({"ok": False, "erro": _ERRO_SO_LEITURA}), 403
     dados = request.get_json(silent=True) or {}
     expressao = (dados.get("expressao") or "").strip()
     produtos = [p.strip() for p in (dados.get("produtos") or []) if (p or "").strip()]
@@ -1430,6 +1444,8 @@ def criar_alias():
 def apagar_alias():
     """Apaga abreviações pelas chaves, onde quer que estejam (criadas ou
     aprendidas). Recebe {chave} (uma) ou {chaves:[...]} (um grupo inteiro)."""
+    if SOMENTE_LEITURA:
+        return jsonify({"ok": False, "erro": _ERRO_SO_LEITURA}), 403
     dados = request.get_json(silent=True) or {}
     chaves = dados.get("chaves") or ([dados["chave"]] if dados.get("chave") else [])
     chaves = [(c or "").strip() for c in chaves if (c or "").strip()]
